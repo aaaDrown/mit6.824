@@ -9,19 +9,6 @@ package mr
 import "os"
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
 // Task worker向coordinator获取task的结构体
 type Task struct {
 	TaskType   TaskType // 任务类型判断到底是map还是reduce
