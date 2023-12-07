@@ -1,48 +1,133 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"strconv"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
+	var intermediate []KeyValue
+	filename := response.Filename
 
-//
-// main/mrworker.go calls this function.
-//
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+	// 通过io工具包获取conten,作为mapf的参数
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+	// map返回一组KV结构体数组
+	intermediate = mapf(filename, string(content))
 
-	// Your worker implementation here.
+	//initialize and loop over []KeyValue
+	rn := response.ReducerNum
+	// 创建一个长度为nReduce的二维切片
+	HashedKV := make([][]KeyValue, rn)
+	for _, kv := range intermediate {
+		HashedKV[(ihash(kv.Key))%rn] = append(HashedKV[(ihash(kv.Key))%rn], kv)
+	}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	for i := 0; i < rn; i++ {
+		oname := "mr-tmp-" + strconv.Itoa(response.TaskId) + "-" + strconv.Itoa(i)
+		ofile, _ := os.Create(oname)
+		enc := json.NewEncoder(ofile)
+		for _, kv := range HashedKV[i] {
+			enc.Encode(kv)
+		}
+		ofile.Close()
+	}
 
 }
 
-//
+// GetTask 获取任务（需要知道是Map任务，还是Reduce）
+func GetTask() Task {
+
+	args := TaskArgs{}
+	reply := Task{}
+	ok := call("Coordinator.PollTask", &args, &reply)
+
+	if ok {
+		fmt.Println(reply)
+	} else {
+		fmt.Printf("call failed!\n")
+	}
+	return reply
+
+}
+
+// callDone Call RPC to mark the task as completed
+func callDone() Task {
+
+	args := Task{}
+	reply := Task{}
+	ok := call("Coordinator.MarkFinished", &args, &reply)
+
+	if ok {
+		fmt.Println(reply)
+	} else {
+		fmt.Printf("call failed!\n")
+	}
+	return reply
+
+}
+
+// main/mrworker.go calls this function.
+func Worker(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
+
+	keepFlag := true
+	for keepFlag {
+		task := GetTask()
+		switch task.TaskType {
+		case MapTask:
+			{
+				DoMapTask(mapf, &task)
+				callDone()
+			}
+
+		case WaittingTask:
+			{
+				fmt.Println("All tasks are in progress, please wait...")
+				time.Sleep(time.Second)
+			}
+		case ExitTask:
+			{
+				fmt.Println("Task about :[", task.TaskId, "] is terminated...")
+				keepFlag = false
+			}
+
+		}
+	}
+
+}
+
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -53,11 +138,6 @@ func CallExample() {
 
 	// declare a reply structure.
 	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
 	ok := call("Coordinator.Example", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
@@ -67,11 +147,9 @@ func CallExample() {
 	}
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
