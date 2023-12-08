@@ -69,10 +69,8 @@ func GetTask() Task {
 
 	args := TaskArgs{}
 	reply := Task{}
-	fmt.Println("pre get task")
 	ok := call("Coordinator.PollTask", &args, &reply)
 
-	fmt.Printf("%v\n", ok)
 	if ok {
 		fmt.Println(reply)
 	} else {
@@ -101,8 +99,6 @@ func callDone() Task {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	fmt.Println("in work")
 
 	keepFlag := true
 	for keepFlag {
