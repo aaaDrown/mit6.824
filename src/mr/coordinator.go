@@ -119,6 +119,7 @@ func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	fmt.Println("get request")
 	// 判断任务类型存任务
 	switch c.DistPhase {
 	case MapPhase:
