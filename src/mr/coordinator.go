@@ -42,6 +42,7 @@ func (c *Coordinator) generateTaskId() int {
 
 	res := c.TaskId
 	c.TaskId++
+	fmt.Printf("generate taskid %v\n", res)
 	return res
 }
 
@@ -155,6 +156,7 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 		//prevent a duplicated work which returned from another worker
 		if ok && meta.state == Working {
 			meta.state = Done
+			fmt.Printf("%v mark done\n", args.TaskId)
 			fmt.Printf("Map task Id[%d] is finished.\n", args.TaskId)
 		} else {
 			fmt.Printf("Map task Id[%d] is finished,already ! ! !\n", args.TaskId)
@@ -194,11 +196,13 @@ func (t *TaskMetaHolder) checkTaskDone() bool {
 		// 首先判断任务的类型
 		if v.TaskAdr.TaskType == MapTask {
 			// 判断任务是否完成,下同
+			fmt.Println("in check done")
 			if v.state == Done {
 				mapDoneNum++
 			} else {
 				mapUnDoneNum++
 			}
+			fmt.Printf("mapDone :%v unDone :%v\n", mapDoneNum, reduceUnDoneNum)
 		} else if v.TaskAdr.TaskType == ReduceTask {
 			if v.state == Done {
 				reduceDoneNum++
