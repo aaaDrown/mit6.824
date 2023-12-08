@@ -69,8 +69,10 @@ func GetTask() Task {
 
 	args := TaskArgs{}
 	reply := Task{}
+	fmt.Println("pre get task")
 	ok := call("Coordinator.PollTask", &args, &reply)
 
+	fmt.Printf("%v\n", ok)
 	if ok {
 		fmt.Println(reply)
 	} else {
