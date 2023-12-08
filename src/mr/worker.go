@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -29,7 +30,7 @@ func ihash(key string) int {
 func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 	fmt.Printf("do map task%v\n", response)
 	var intermediate []KeyValue
-	filename := response.Filename
+	filename := response.FileSlice[0]
 
 	file, err := os.Open(filename)
 	if err != nil {
@@ -82,7 +83,7 @@ func GetTask() Task {
 
 // callDone Call RPC to mark the task as completed
 func callDone(args *Task) Task {
-	
+
 	reply := Task{}
 	ok := call("Coordinator.MarkFinished", args, &reply)
 
@@ -93,6 +94,53 @@ func callDone(args *Task) Task {
 	}
 	return reply
 
+}
+
+// 洗牌方法，得到一组排序好的kv数组
+func shuffle(files []string) []KeyValue {
+	var kva []KeyValue
+	for _, filepath := range files {
+		file, _ := os.Open(filepath)
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(SortedKey(kva))
+	return kva
+}
+
+func DoReduceTask(reducef func(string, []string) string, response *Task) {
+	reduceFileNum := response.TaskId
+	intermediate := shuffle(response.FileSlice)
+	dir, _ := os.Getwd()
+	//tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
+	tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
+	if err != nil {
+		log.Fatal("Failed to create temp file", err)
+	}
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		var values []string
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	tempFile.Close()
+	fn := fmt.Sprintf("mr-out-%d", reduceFileNum)
+	os.Rename(tempFile.Name(), fn)
 }
 
 // main/mrworker.go calls this function.
@@ -107,6 +155,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		case MapTask:
 			{
 				DoMapTask(mapf, &task)
+				callDone(&task)
+			}
+
+		case ReduceTask:
+			{
+				DoReduceTask(reducef, &task)
 				callDone(&task)
 			}
 

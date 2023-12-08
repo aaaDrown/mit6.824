@@ -2,7 +2,10 @@ package mr
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 )
 import "net"
@@ -76,7 +79,7 @@ func (c *Coordinator) makeMapTasks(files []string) {
 			TaskType:   MapTask,
 			TaskId:     id,
 			ReducerNum: c.ReducerNum,
-			Filename:   v,
+			FileSlice:  []string{v},
 		}
 
 		// 保存任务的初始状态
@@ -88,6 +91,40 @@ func (c *Coordinator) makeMapTasks(files []string) {
 
 		fmt.Println("make a map task :", &task)
 		c.TaskChannelMap <- &task
+	}
+}
+
+func selectReduceName(reduceNum int) []string {
+	var s []string
+	path, _ := os.Getwd()
+	files, _ := ioutil.ReadDir(path)
+	for _, fi := range files {
+		// 匹配对应的reduce文件
+		if strings.HasPrefix(fi.Name(), "mr-tmp") && strings.HasSuffix(fi.Name(), strconv.Itoa(reduceNum)) {
+			s = append(s, fi.Name())
+		}
+	}
+	return s
+}
+
+func (c *Coordinator) makeReduceTasks() {
+	for i := 0; i < c.ReducerNum; i++ {
+		id := c.generateTaskId()
+		task := Task{
+			TaskId:    id,
+			TaskType:  ReduceTask,
+			FileSlice: selectReduceName(i),
+		}
+
+		// 保存任务的初始状态
+		taskMetaInfo := TaskMetaInfo{
+			state:   Waiting, // 任务等待被执行
+			TaskAdr: &task,   // 保存任务的地址
+		}
+		c.taskMetaHolder.acceptMeta(&taskMetaInfo)
+
+		//fmt.Println("make a reduce task :", &task)
+		c.TaskChannelReduce <- &task
 	}
 }
 
@@ -136,10 +173,28 @@ func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
 				return nil
 			}
 		}
-	default:
+	case ReducePhase:
+		{
+			if len(c.TaskChannelReduce) > 0 {
+				*reply = *<-c.TaskChannelReduce
+				if !c.taskMetaHolder.judgeState(reply.TaskId) {
+					fmt.Printf("Reduce-taskid[ %d ] is running\n", reply.TaskId)
+				}
+			} else {
+				reply.TaskType = WaittingTask // 如果map任务被分发完了但是又没完成，此时就将任务设为Waitting
+				if c.taskMetaHolder.checkTaskDone() {
+					c.toNextPhase()
+				}
+				return nil
+			}
+		}
+
+	case AllDone:
 		{
 			reply.TaskType = ExitTask
 		}
+	default:
+		panic("The phase undefined ! ! !")
 
 	}
 
@@ -172,10 +227,8 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 
 func (c *Coordinator) toNextPhase() {
 	if c.DistPhase == MapPhase {
-		//c.makeReduceTasks()
-
-		// todo
-		c.DistPhase = AllDone
+		c.makeReduceTasks()
+		c.DistPhase = ReducePhase
 	} else if c.DistPhase == ReducePhase {
 		c.DistPhase = AllDone
 	}

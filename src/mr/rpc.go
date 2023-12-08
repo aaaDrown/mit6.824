@@ -14,8 +14,14 @@ type Task struct {
 	TaskType   TaskType // 任务类型判断到底是map还是reduce
 	TaskId     int      // 任务的id
 	ReducerNum int      // 传入的reducer的数量，用于hash
-	Filename   string   // 输入文件
+	FileSlice  []string // 输入文件
 }
+type SortedKey []KeyValue
+
+// Len 重写len,swap,less才能排序
+func (k SortedKey) Len() int           { return len(k) }
+func (k SortedKey) Swap(i, j int)      { k[i], k[j] = k[j], k[i] }
+func (k SortedKey) Less(i, j int) bool { return k[i].Key < k[j].Key }
 
 // TaskArgs rpc应该传入的参数，可实际上应该什么都不用传,因为只是worker获取一个任务
 type TaskArgs struct{}
