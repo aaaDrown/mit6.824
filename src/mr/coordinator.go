@@ -211,10 +211,20 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 		//prevent a duplicated work which returned from another worker
 		if ok && meta.state == Working {
 			meta.state = Done
-			fmt.Printf("%v mark done\n", args.TaskId)
-			fmt.Printf("Map task Id[%d] is finished.\n", args.TaskId)
+			//fmt.Printf("Map task Id[%d] is finished.\n", args.TaskId)
 		} else {
 			fmt.Printf("Map task Id[%d] is finished,already ! ! !\n", args.TaskId)
+		}
+		break
+	case ReduceTask:
+		meta, ok := c.taskMetaHolder.MetaMap[args.TaskId]
+
+		//prevent a duplicated work which returned from another worker
+		if ok && meta.state == Working {
+			meta.state = Done
+			//fmt.Printf("Reduce task Id[%d] is finished.\n", args.TaskId)
+		} else {
+			fmt.Printf("Reduce task Id[%d] is finished,already ! ! !\n", args.TaskId)
 		}
 		break
 
