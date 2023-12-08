@@ -27,6 +27,7 @@ func ihash(key string) int {
 }
 
 func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
+	fmt.Printf("do map task%v\n", response)
 	var intermediate []KeyValue
 	filename := response.Filename
 
@@ -99,9 +100,12 @@ func callDone() Task {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
+	fmt.Println("in work")
+
 	keepFlag := true
 	for keepFlag {
 		task := GetTask()
+		fmt.Printf("get task %v\n", task)
 		switch task.TaskType {
 		case MapTask:
 			{
