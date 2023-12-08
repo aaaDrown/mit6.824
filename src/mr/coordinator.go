@@ -191,6 +191,7 @@ func (t *TaskMetaHolder) checkTaskDone() bool {
 		reduceUnDoneNum = 0
 	)
 
+	fmt.Printf("metaMap %v\n\n", t.MetaMap)
 	// 遍历储存task信息的map
 	for _, v := range t.MetaMap {
 		// 首先判断任务的类型

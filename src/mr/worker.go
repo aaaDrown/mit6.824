@@ -81,14 +81,13 @@ func GetTask() Task {
 }
 
 // callDone Call RPC to mark the task as completed
-func callDone() Task {
-
-	args := Task{}
+func callDone(args *Task) Task {
+	
 	reply := Task{}
-	ok := call("Coordinator.MarkFinished", &args, &reply)
+	ok := call("Coordinator.MarkFinished", args, &reply)
 
 	if ok {
-		fmt.Println(reply)
+		fmt.Printf("get reply %v\n", reply)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
@@ -108,7 +107,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case MapTask:
 			{
 				DoMapTask(mapf, &task)
-				callDone()
+				callDone(&task)
 			}
 
 		case WaittingTask:
