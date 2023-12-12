@@ -37,6 +37,12 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
+const (
+	Candidate = iota
+	Fellower
+	Leader
+)
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -61,6 +67,7 @@ type Raft struct {
 	currentLeader int
 	votedFor      int
 	log           []int
+	status        int
 
 	commitIndex int
 	lastApplied int
@@ -133,8 +140,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int
@@ -143,17 +148,51 @@ type RequestVoteArgs struct {
 	LastLogTerm  int
 }
 
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	// Your data here (2A, 2B).
+	Term        int
+	LeaderId    int
+	PreLogIndex int
+	PreLogTerm  int
+
+	LogEntries   []int
+	leaderCommit int
+}
+
+type AppendEntriesReply struct {
+	// Your data here (2A).
+	Term    int
+	Success bool
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	//不够格
+	if rf.currentTerm > args.Term {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	} else {
+		reply.VoteGranted = true
+		reply.Term = args.Term
+		return
+	}
+}
+
+// 发送心跳 / 日志更新消息
+func (rf *Raft) sendAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+}
+
+// 心跳 / 日志更新消息 handler
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 }
 
@@ -235,6 +274,7 @@ func (rf *Raft) ticker() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
+		// 若sleep过程中没有接收到心跳，则发起选举
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
