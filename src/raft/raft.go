@@ -39,7 +39,7 @@ import (
 // other uses.
 const (
 	Candidate = iota
-	Fellower
+	Follower
 	Leader
 )
 
@@ -63,11 +63,12 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	currentTerm   int
-	currentLeader int
-	votedFor      int
-	log           []int
-	status        int
+	currentTerm     int
+	currentLeader   int
+	votedFor        int
+	logs            []LogEntry
+	status          int //candidate Follower Leader
+	LeaderHeartBeat bool
 
 	commitIndex int
 	lastApplied int
@@ -154,6 +155,14 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type LogEntry struct {
+	LogIndex int
+	content  string
+
+	Term     int
+	LeaderId int
+}
+
 type AppendEntriesArgs struct {
 	// Your data here (2A, 2B).
 	Term        int
@@ -161,7 +170,7 @@ type AppendEntriesArgs struct {
 	PreLogIndex int
 	PreLogTerm  int
 
-	LogEntries   []int
+	Logs         []LogEntry
 	leaderCommit int
 }
 
@@ -171,29 +180,47 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	//不够格
-	if rf.currentTerm > args.Term {
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
-		return
-	} else {
-		reply.VoteGranted = true
-		reply.Term = args.Term
-		return
-	}
-}
-
 // 发送心跳 / 日志更新消息
-func (rf *Raft) sendAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
 }
 
 // 心跳 / 日志更新消息 handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if rf.currentTerm > args.Term { //直接拒绝
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	} else if rf.currentTerm == args.Term {
+		if len(args.Logs) == 0 { //心跳 更新计时
+			rf.LeaderHeartBeat = true
+			reply.Success = true
+			reply.Term = args.Term
+		}
+	} else {
+		//TODO 接受日志更新
+	}
+}
 
+// example RequestVote RPC handler.
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// Your code here (2A, 2B).
+	//不够格
+	if rf.currentTerm >= args.Term {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+	} else {
+		//Leader收到了怎么办？
+		if rf.status != Candidate && rf.votedFor == 0 {
+			reply.VoteGranted = true
+			reply.Term = args.Term
+			rf.votedFor = args.Term
+		} else {
+			reply.VoteGranted = false
+			reply.Term = 0
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -269,12 +296,56 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) HeartBeat() {
+	for rf.killed() == false {
+		if rf.status == Leader {
+			for i, _ := range rf.peers {
+				args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
+				reply := AppendEntriesReply{}
+				rf.sendAppendEntries(i, &args, &reply)
+			}
+			time.Sleep(time.Duration(10) * time.Millisecond)
+		}
+	}
+}
+
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		// 若sleep过程中没有接收到心跳，则发起选举
+		if rf.LeaderHeartBeat == false && rf.status == Follower {
+			voted := 1
+			rf.status = Candidate
+			rf.votedFor = rf.me
+			rf.currentTerm++
+
+			//是否需要并发
+			for i, _ := range rf.peers {
+				args := RequestVoteArgs{rf.currentTerm, rf.me, 0, 0}
+				reply := RequestVoteReply{}
+
+				rf.sendRequestVote(i, &args, &reply)
+				if reply.VoteGranted == true {
+					voted++
+				}
+			}
+			//中了
+			if voted > len(rf.peers)/2 {
+				rf.status = Leader
+				rf.currentLeader = rf.me
+				for i, _ := range rf.peers {
+					args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
+					reply := AppendEntriesReply{}
+					rf.sendAppendEntries(i, &args, &reply)
+				}
+			} else { //没中
+				rf.status = Follower
+			}
+		} else {
+			rf.LeaderHeartBeat = false
+		}
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -300,7 +371,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	go rf.HeartBeat()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
