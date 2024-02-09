@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	//	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -298,20 +297,19 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) HeartBeat() {
 	for rf.killed() == false {
-		if rf.status == Leader {
-			for i, _ := range rf.peers {
-				args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
-				reply := AppendEntriesReply{}
-				rf.sendAppendEntries(i, &args, &reply)
-			}
-			time.Sleep(time.Duration(10) * time.Millisecond)
+		for i, _ := range rf.peers {
+			args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
+			reply := AppendEntriesReply{}
+			rf.sendAppendEntries(i, &args, &reply)
 		}
+		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
+		ms := 50 + (rand.Int63() % 300)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		// 若sleep过程中没有接收到心跳，则发起选举
@@ -322,10 +320,9 @@ func (rf *Raft) ticker() {
 			rf.currentTerm++
 
 			//是否需要并发
+			args := RequestVoteArgs{rf.currentTerm, rf.me, 0, 0}
 			for i, _ := range rf.peers {
-				args := RequestVoteArgs{rf.currentTerm, rf.me, 0, 0}
 				reply := RequestVoteReply{}
-
 				rf.sendRequestVote(i, &args, &reply)
 				if reply.VoteGranted == true {
 					voted++
@@ -340,6 +337,7 @@ func (rf *Raft) ticker() {
 					reply := AppendEntriesReply{}
 					rf.sendAppendEntries(i, &args, &reply)
 				}
+				go rf.HeartBeat()
 			} else { //没中
 				rf.status = Follower
 			}
@@ -349,8 +347,6 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -369,9 +365,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.status = Follower
 
 	// Your initialization code here (2A, 2B, 2C).
-	go rf.HeartBeat()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
