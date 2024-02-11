@@ -88,8 +88,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = rf.me == rf.currentLeader
+	rf.mu.Unlock()
 	return term, isleader
 }
 
@@ -156,7 +158,7 @@ type RequestVoteReply struct {
 
 type LogEntry struct {
 	LogIndex int
-	content  string
+	Content  string
 
 	Term     int
 	LeaderId int
@@ -170,7 +172,7 @@ type AppendEntriesArgs struct {
 	PreLogTerm  int
 
 	Logs         []LogEntry
-	leaderCommit int
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -180,7 +182,8 @@ type AppendEntriesReply struct {
 }
 
 // 发送心跳 / 日志更新消息
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, wg *sync.WaitGroup) bool {
+	defer wg.Done()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -197,8 +200,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = true
 			reply.Term = args.Term
 		}
-	} else {
 		//TODO 接受日志更新
+	} else {
+		rf.currentTerm = args.Term
+		rf.status = Follower
+		rf.votedFor = -1
 	}
 }
 
@@ -211,7 +217,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 	} else {
 		//Leader收到了怎么办？
-		if rf.status != Candidate && rf.votedFor == 0 {
+		if rf.status != Candidate && rf.votedFor == -1 {
 			reply.VoteGranted = true
 			reply.Term = args.Term
 			rf.votedFor = args.Term
@@ -249,8 +255,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, wg *sync.WaitGroup, mu *sync.Mutex, voted *int) bool {
+	defer wg.Done()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if reply.VoteGranted == true {
+		mu.Lock()
+		*voted++
+		mu.Unlock()
+	}
 	return ok
 }
 
@@ -297,11 +309,14 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) HeartBeat() {
 	for rf.killed() == false {
+		wg := sync.WaitGroup{}
+		reply := AppendEntriesReply{}
+		args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
 		for i, _ := range rf.peers {
-			args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
-			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(i, &args, &reply)
+			wg.Add(1)
+			go rf.sendAppendEntries(i, &args, &reply, &wg)
 		}
+		wg.Wait()
 		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
@@ -319,27 +334,28 @@ func (rf *Raft) ticker() {
 			rf.votedFor = rf.me
 			rf.currentTerm++
 
-			//是否需要并发
+			wg := sync.WaitGroup{}
+			mu := sync.Mutex{}
+
 			args := RequestVoteArgs{rf.currentTerm, rf.me, 0, 0}
 			for i, _ := range rf.peers {
 				reply := RequestVoteReply{}
-				rf.sendRequestVote(i, &args, &reply)
-				if reply.VoteGranted == true {
-					voted++
-				}
+				wg.Add(1)
+				go rf.sendRequestVote(i, &args, &reply, &wg, &mu, &voted)
 			}
+			wg.Wait()
 			//中了
 			if voted > len(rf.peers)/2 {
+				rf.mu.Lock()
 				rf.status = Leader
 				rf.currentLeader = rf.me
-				for i, _ := range rf.peers {
-					args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
-					reply := AppendEntriesReply{}
-					rf.sendAppendEntries(i, &args, &reply)
-				}
+				rf.mu.Unlock()
 				go rf.HeartBeat()
 			} else { //没中
+				rf.mu.Lock()
 				rf.status = Follower
+				rf.currentTerm--
+				rf.mu.Unlock()
 			}
 		} else {
 			rf.LeaderHeartBeat = false
@@ -366,6 +382,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.status = Follower
+	rf.votedFor = -1
 
 	// Your initialization code here (2A, 2B, 2C).
 	// initialize from state persisted before a crash
