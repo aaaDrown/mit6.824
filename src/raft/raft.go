@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -63,10 +64,9 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	currentTerm     int
-	currentLeader   int
 	votedFor        int
 	logs            []LogEntry
-	status          int //candidate Follower Leader
+	status          int // Candidate Follower Leader
 	LeaderHeartBeat bool
 
 	commitIndex int
@@ -86,13 +86,13 @@ type Raft struct {
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
-	var isleader bool
+	var leader bool
 	// Your code here (2A).
-	rf.mu.Lock()
+	//rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = rf.me == rf.currentLeader
-	rf.mu.Unlock()
-	return term, isleader
+	leader = rf.status == Leader
+	//rf.mu.Unlock()
+	return term, leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -182,13 +182,15 @@ type AppendEntriesReply struct {
 }
 
 // 发送心跳 / 日志更新消息
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, wg *sync.WaitGroup) bool {
-	defer wg.Done()
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	if server != rf.me {
+		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		return ok
+	}
+	return true
 }
 
-// 心跳 / 日志更新消息 handler
+// 选举成功 / Leader心跳 / 日志更新消息 handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if rf.currentTerm > args.Term { //直接拒绝
 		reply.Success = false
@@ -196,14 +198,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else if rf.currentTerm == args.Term {
 		if len(args.Logs) == 0 { //心跳 更新计时
+			fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
 			rf.LeaderHeartBeat = true
 			reply.Success = true
 			reply.Term = args.Term
 		}
 		//TODO 接受日志更新
-	} else {
+	} else { // 选举成功/脑裂合并
+		t := rf.currentTerm
+		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		rf.status = Follower
+		rf.mu.Unlock()
+		fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
 		rf.votedFor = -1
 	}
 }
@@ -212,19 +219,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//不够格
-	if rf.currentTerm >= args.Term {
+	rf.mu.Lock()
+	if rf.currentTerm > args.Term {
+		rf.mu.Unlock()
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-	} else {
-		//Leader收到了怎么办？
-		if rf.status != Candidate && rf.votedFor == -1 {
+	} else if rf.currentTerm == args.Term {
+		if rf.votedFor == -1 && rf.status == Follower {
+			rf.votedFor = args.Term
+			rf.mu.Unlock()
+			fmt.Printf("%v voted for %v, now term %v\n", rf.me, args.CandidateId, rf.currentTerm)
 			reply.VoteGranted = true
 			reply.Term = args.Term
-			rf.votedFor = args.Term
 		} else {
-			reply.VoteGranted = false
-			reply.Term = 0
+			rf.mu.Unlock()
 		}
+	} else {
+		rf.mu.Unlock()
+		reply.VoteGranted = false
+		reply.Term = 0
 	}
 }
 
@@ -255,15 +268,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, wg *sync.WaitGroup, mu *sync.Mutex, voted *int) bool {
-	defer wg.Done()
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if reply.VoteGranted == true {
-		mu.Lock()
-		*voted++
-		mu.Unlock()
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, mu *sync.Mutex, ch chan int, voted *int) bool {
+	if server != rf.me {
+		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		if reply.VoteGranted == true {
+			mu.Lock()
+			*voted++
+			if *voted > len(rf.peers)/2 {
+				ch <- 1
+			}
+			mu.Unlock()
+		}
+		return ok
 	}
-	return ok
+	return true
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -309,14 +327,19 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) HeartBeat() {
 	for rf.killed() == false {
-		wg := sync.WaitGroup{}
-		reply := AppendEntriesReply{}
-		args := AppendEntriesArgs{rf.currentTerm, rf.currentLeader, 0, 0, nil, 0}
-		for i, _ := range rf.peers {
-			wg.Add(1)
-			go rf.sendAppendEntries(i, &args, &reply, &wg)
+		rf.mu.Lock()
+		if rf.status == Leader {
+			rf.mu.Unlock()
+			fmt.Printf("%v send heart beat\n", rf.me)
+			args := AppendEntriesArgs{rf.currentTerm, rf.me, 0, 0, nil, 0}
+			for i, _ := range rf.peers {
+				reply := AppendEntriesReply{}
+				go rf.sendAppendEntries(i, &args, &reply)
+			}
+		} else {
+			rf.mu.Unlock()
 		}
-		wg.Wait()
+
 		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
@@ -327,42 +350,57 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		// Your code here (2A)
 		// Check if a leader election should be started.
+
 		// 若sleep过程中没有接收到心跳，则发起选举
-		if rf.LeaderHeartBeat == false && rf.status == Follower {
+		rf.mu.Lock()
+		if rf.LeaderHeartBeat == false && rf.status == Follower && rf.votedFor == -1 {
+			rf.mu.Unlock()
+			fmt.Printf("%d receive no heart beat,begin electron\n", rf.me)
 			voted := 1
+			rf.mu.Lock()
 			rf.status = Candidate
 			rf.votedFor = rf.me
-			rf.currentTerm++
-
-			wg := sync.WaitGroup{}
+			rf.mu.Unlock()
 			mu := sync.Mutex{}
+			ch := make(chan int)
 
 			args := RequestVoteArgs{rf.currentTerm, rf.me, 0, 0}
 			for i, _ := range rf.peers {
 				reply := RequestVoteReply{}
-				wg.Add(1)
-				go rf.sendRequestVote(i, &args, &reply, &wg, &mu, &voted)
+				go rf.sendRequestVote(i, &args, &reply, &mu, ch, &voted)
 			}
-			wg.Wait()
-			//中了
-			if voted > len(rf.peers)/2 {
-				rf.mu.Lock()
+			// 有些可能故障了回应不了，不用等，只要有半数回应就可以了
+
+			// 等不到半数就一直等，除非已经有别的candidate选举成功为leader把当前candidate改为了follower
+			// TODO:如何等待唤醒？
+			<-ch
+			rf.mu.Lock()
+			// 中了
+			if voted > len(rf.peers)/2 && rf.status == Candidate {
 				rf.status = Leader
-				rf.currentLeader = rf.me
+				rf.currentTerm++
 				rf.mu.Unlock()
-				go rf.HeartBeat()
-			} else { //没中
-				rf.mu.Lock()
-				rf.status = Follower
-				rf.currentTerm--
+				fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.currentTerm)
+
+				// 选举成功之后立马宣布
+				wg := sync.WaitGroup{}
+				args := AppendEntriesArgs{rf.currentTerm, rf.me, 0, 0, nil, 0}
+				for i, _ := range rf.peers {
+					reply := AppendEntriesReply{}
+					wg.Add(1)
+					go rf.sendAppendEntries(i, &args, &reply)
+				}
+			} else {
 				rf.mu.Unlock()
 			}
 		} else {
-			rf.LeaderHeartBeat = false
+			rf.mu.Unlock()
 		}
-
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
+		rf.mu.Lock()
+		rf.LeaderHeartBeat = false
+		rf.mu.Unlock()
 	}
 }
 
@@ -390,6 +428,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.HeartBeat()
 
 	return rf
 }
