@@ -42,6 +42,7 @@ const (
 	Follower
 	Leader
 )
+const ElectionTimeout = 1000 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -198,7 +199,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else if rf.currentTerm == args.Term {
 		if len(args.Logs) == 0 { //心跳 更新计时
-			fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
+			//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
 			rf.LeaderHeartBeat = true
 			reply.Success = true
 			reply.Term = args.Term
@@ -209,9 +210,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		rf.status = Follower
+		rf.LeaderHeartBeat = true
+		rf.votedFor = -1
 		rf.mu.Unlock()
 		fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
-		rf.votedFor = -1
 	}
 }
 
@@ -330,7 +332,7 @@ func (rf *Raft) HeartBeat() {
 		rf.mu.Lock()
 		if rf.status == Leader {
 			rf.mu.Unlock()
-			fmt.Printf("%v send heart beat\n", rf.me)
+			//fmt.Printf("%v send heart beat\n", rf.me)
 			args := AppendEntriesArgs{rf.currentTerm, rf.me, 0, 0, nil, 0}
 			for i, _ := range rf.peers {
 				reply := AppendEntriesReply{}
@@ -350,10 +352,10 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		// Your code here (2A)
 		// Check if a leader election should be started.
-
 		// 若sleep过程中没有接收到心跳，则发起选举
+		oldLeader := rf.votedFor
 		rf.mu.Lock()
-		if rf.LeaderHeartBeat == false && rf.status == Follower && rf.votedFor == -1 {
+		if rf.LeaderHeartBeat == false && rf.status == Follower {
 			rf.mu.Unlock()
 			fmt.Printf("%d receive no heart beat,begin electron\n", rf.me)
 			voted := 1
@@ -372,25 +374,33 @@ func (rf *Raft) ticker() {
 			// 有些可能故障了回应不了，不用等，只要有半数回应就可以了
 
 			// 等不到半数就一直等，除非已经有别的candidate选举成功为leader把当前candidate改为了follower
-			// TODO:如何等待唤醒？
-			<-ch
-			rf.mu.Lock()
-			// 中了
-			if voted > len(rf.peers)/2 && rf.status == Candidate {
-				rf.status = Leader
-				rf.currentTerm++
-				rf.mu.Unlock()
-				fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.currentTerm)
+			// 使用select监听ch
+			select {
+			case <-ch:
+				rf.mu.Lock()
+				// 如果被选中为leader
+				if voted > len(rf.peers)/2 && rf.status == Candidate {
+					rf.status = Leader
+					rf.currentTerm++
+					rf.mu.Unlock()
+					fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.currentTerm)
 
-				// 选举成功之后立马宣布
-				wg := sync.WaitGroup{}
-				args := AppendEntriesArgs{rf.currentTerm, rf.me, 0, 0, nil, 0}
-				for i, _ := range rf.peers {
-					reply := AppendEntriesReply{}
-					wg.Add(1)
-					go rf.sendAppendEntries(i, &args, &reply)
+					// 选举成功之后立马宣布
+					wg := sync.WaitGroup{}
+					args := AppendEntriesArgs{rf.currentTerm, rf.me, 0, 0, nil, 0}
+					for i, _ := range rf.peers {
+						reply := AppendEntriesReply{}
+						wg.Add(1)
+						go rf.sendAppendEntries(i, &args, &reply)
+					}
+				} else {
+					rf.mu.Unlock()
 				}
-			} else {
+				//如果超过了选举时间，则此次选举失败
+			case <-time.After(ElectionTimeout):
+				rf.mu.Lock()
+				rf.status = Follower
+				rf.votedFor = oldLeader
 				rf.mu.Unlock()
 			}
 		} else {
