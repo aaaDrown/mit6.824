@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -219,15 +218,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else {
 				rf.mu.Unlock()
 			}
-			fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
+			//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
 			rf.LeaderHeartBeat = true
 			reply.Success = true
 			reply.Term = args.Term
 		}
 		//TODO 接受日志更新
 	} else { // 选举成功/脑裂合并
-		t := rf.currentTerm
-		fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
+		//t := rf.currentTerm
+		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
 		rf.mu.Lock()
 		rf.LeaderHeartBeat = true
 		rf.votedFor = -1
@@ -264,7 +263,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor == -1 && rf.status == Follower {
 			rf.votedFor = args.CandidateId
 			rf.mu.Unlock()
-			fmt.Printf("%v voted for %v, now term %v\n", rf.me, args.CandidateId, rf.currentTerm)
+			//fmt.Printf("%v voted for %v, now term %v\n", rf.me, args.CandidateId, rf.currentTerm)
 			reply.VoteGranted = true
 			reply.Term = args.Term
 		} else {
@@ -370,7 +369,7 @@ func (rf *Raft) HeartBeat() {
 		rf.mu.Lock()
 		if rf.status == Leader {
 			rf.mu.Unlock()
-			fmt.Printf("%v send heart beat\n", rf.me)
+			//fmt.Printf("%v send heart beat\n", rf.me)
 			args := AppendEntriesArgs{rf.currentTerm, rf.me, 0, 0, nil, 0}
 			for i, _ := range rf.peers {
 				reply := AppendEntriesReply{}
@@ -398,7 +397,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		if rf.LeaderHeartBeat == false && rf.status == Follower && rf.votedFor == -1 {
 			rf.mu.Unlock()
-			fmt.Printf("%d receive no heart beat,begin electron,now term: %v\n", rf.me, rf.currentTerm)
+			//fmt.Printf("%d receive no heart beat,begin electron,now term: %v\n", rf.me, rf.currentTerm)
 			voted := 1
 			rf.mu.Lock()
 			rf.status = Candidate
@@ -425,12 +424,12 @@ func (rf *Raft) ticker() {
 					rf.currentTerm++
 					rf.votedFor = -1
 					rf.mu.Unlock()
-					fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.currentTerm)
+					//fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.currentTerm)
 
 					// 选举成功之后立马宣布
 					go rf.HeartBeat()
 				} else {
-					fmt.Printf("%v elect failure", rf.me)
+					//fmt.Printf("%v elect failure", rf.me)
 					rf.status = Follower
 					rf.votedFor = -1
 					rf.mu.Unlock()
@@ -438,7 +437,7 @@ func (rf *Raft) ticker() {
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
 			case <-time.After(ElectionTimeout):
-				fmt.Printf("%v elect failure", rf.me)
+				//fmt.Printf("%v elect failure", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower
 				rf.votedFor = -1
