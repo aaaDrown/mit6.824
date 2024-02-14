@@ -64,7 +64,7 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	//cut chan int
+	voteResult chan int
 
 	currentTerm     int
 	votedFor        int
@@ -216,7 +216,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.mu.Unlock()
 				rf.status = Follower
 				rf.votedFor = -1
-				//rf.cut <- 1
+				rf.voteResult <- 1
 			} else {
 				rf.mu.Unlock()
 			}
@@ -228,13 +228,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//TODO 接受日志更新
 	} else { // 选举成功/脑裂合并
 		t := rf.currentTerm
+		fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
 		rf.mu.Lock()
-		rf.currentTerm = args.Term
-		rf.status = Follower
 		rf.LeaderHeartBeat = true
 		rf.votedFor = -1
+		rf.currentTerm = args.Term
+		if rf.status == Candidate {
+			rf.status = Follower
+			rf.voteResult <- 1
+		}
+		rf.status = Follower
 		rf.mu.Unlock()
-		fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
 	}
 }
 
@@ -402,22 +406,22 @@ func (rf *Raft) ticker() {
 			rf.votedFor = rf.me
 			rf.mu.Unlock()
 			mu := sync.Mutex{}
-			ch := make(chan int)
+			rf.voteResult = make(chan int)
 
 			args := RequestVoteArgs{rf.currentTerm, rf.me, 0, 0}
 			for i, _ := range rf.peers {
 				reply := RequestVoteReply{}
-				go rf.sendRequestVote(i, &args, &reply, &mu, ch, &voted)
+				go rf.sendRequestVote(i, &args, &reply, &mu, rf.voteResult, &voted)
 			}
 			// 有些可能故障了回应不了，不用等，只要有半数回应就可以了
 
 			// 等不到半数就一直等，除非已经有别的candidate选举成功为leader把当前candidate改为了follower
 			// 使用select监听ch
 			select {
-			case <-ch:
+			case <-rf.voteResult:
 				rf.mu.Lock()
 				// 如果被选中为leader
-				if rf.LeaderHeartBeat == false && voted > len(rf.peers)/2 && rf.status == Candidate {
+				if voted > len(rf.peers)/2 && rf.status == Candidate {
 					rf.status = Leader
 					rf.currentTerm++
 					rf.votedFor = -1
@@ -427,17 +431,13 @@ func (rf *Raft) ticker() {
 					// 选举成功之后立马宣布
 					go rf.HeartBeat()
 				} else {
+					fmt.Printf("%v elect failure", rf.me)
+					rf.status = Follower
+					rf.votedFor = -1
 					rf.mu.Unlock()
 				}
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
-			//case <-rf.cut:
-			//	fmt.Printf("%v elect failure", rf.me)
-			//	args := RequestVoteArgs{-1, rf.me, 0, 0}
-			//	for i, _ := range rf.peers {
-			//		reply := RequestVoteReply{}
-			//		go rf.sendRequestVote(i, &args, &reply, &mu, ch, &voted)
-			//	}
 			case <-time.After(ElectionTimeout):
 				fmt.Printf("%v elect failure", rf.me)
 				rf.mu.Lock()
@@ -447,17 +447,14 @@ func (rf *Raft) ticker() {
 				args := RequestVoteArgs{-1, rf.me, 0, 0}
 				for i, _ := range rf.peers {
 					reply := RequestVoteReply{}
-					go rf.sendRequestVote(i, &args, &reply, &mu, ch, &voted)
+					go rf.sendRequestVote(i, &args, &reply, &mu, rf.voteResult, &voted)
 				}
 
 			}
 		} else {
+			rf.LeaderHeartBeat = false
 			rf.mu.Unlock()
 		}
-
-		rf.mu.Lock()
-		rf.LeaderHeartBeat = false
-		rf.mu.Unlock()
 	}
 }
 
