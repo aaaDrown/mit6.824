@@ -64,13 +64,12 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	voteResult chan int
-
 	currentTerm     int
 	votedFor        int
 	logs            []LogEntry
 	status          int // Candidate Follower Leader
 	LeaderHeartBeat bool
+	voteResult      chan int // 若能提前得知竞选结果，则立刻通知
 
 	commitIndex int
 	lastApplied int
