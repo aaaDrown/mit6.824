@@ -186,6 +186,10 @@ type AppendEntriesReply struct {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	if server != rf.me {
 		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		for !ok {
+			time.Sleep(10 * time.Millisecond)
+			ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		}
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
@@ -310,6 +314,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, mu *sync.Mutex, ch chan int, voted *int) bool {
 	if server != rf.me {
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		for !ok {
+			time.Sleep(10 * time.Millisecond)
+			ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
+		}
 		if reply.VoteGranted == true {
 			mu.Lock()
 			*voted++
