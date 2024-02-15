@@ -210,7 +210,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(args.Logs) == 0 {
 			//心跳 更新计时
 			rf.mu.Lock()
-			if rf.status == Candidate {
+			if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
 				rf.mu.Unlock()
 				rf.status = Follower
 				rf.votedFor = -1
@@ -231,7 +231,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.LeaderHeartBeat = true
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
-		if rf.status == Candidate {
+		if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
 			rf.status = Follower
 			rf.voteResult <- 1
 		}
@@ -243,7 +243,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	//不够格
+	// 选举失败信息
 	if args.Term == -1 {
 		rf.mu.Lock()
 		if args.CandidateId == rf.votedFor {
@@ -255,7 +255,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	rf.mu.Lock()
-	if rf.currentTerm > args.Term {
+	if rf.currentTerm > args.Term { // term不够
 		rf.mu.Unlock()
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -269,7 +269,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		} else {
 			rf.mu.Unlock()
 		}
-	} else { // rf.currentTerm < args.Term
+	} else { // rf.currentTerm < args.Term 此时必须同意
 		rf.status = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = args.CandidateId
@@ -409,9 +409,10 @@ func (rf *Raft) ticker() {
 				reply := RequestVoteReply{}
 				go rf.sendRequestVote(i, &args, &reply, &mu, rf.voteResult, &voted)
 			}
-			// 有些可能故障了回应不了，不用等，只要有半数回应就可以了
-
-			// 等不到半数就一直等，除非已经有别的candidate选举成功为leader把当前candidate改为了follower
+			// 有些可能故障了回应不了，不用等，只要有半数回应就通过channel通知
+			// 等不到半数就一直等
+			// 除非已经有别的candidate选举成功为leader把当前candidate改为了follower，或者老leader复活等情况
+			// 导致当前选举一定会失败
 			// 使用select监听ch
 			select {
 			case <-rf.voteResult:
@@ -423,7 +424,6 @@ func (rf *Raft) ticker() {
 					rf.votedFor = -1
 					rf.mu.Unlock()
 					//fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.currentTerm)
-
 					// 选举成功之后立马宣布
 					go rf.HeartBeat()
 				} else {
