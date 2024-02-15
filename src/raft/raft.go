@@ -41,7 +41,7 @@ const (
 	Follower
 	Leader
 )
-const ElectionTimeout = 1000 * time.Millisecond
+const ElectionTimeout = 500 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -89,10 +89,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var leader bool
 	// Your code here (2A).
-	//rf.mu.Lock()
+	rf.mu.Lock()
 	term = rf.currentTerm
 	leader = rf.status == Leader
-	//rf.mu.Unlock()
+	rf.mu.Unlock()
 	return term, leader
 }
 
@@ -381,15 +381,13 @@ func (rf *Raft) HeartBeat() {
 			return
 		}
 
-		time.Sleep(time.Duration(10) * time.Millisecond)
+		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 }
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 150 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		// Your code here (2A)
 		// Check if a leader election should be started.
@@ -436,7 +434,7 @@ func (rf *Raft) ticker() {
 				}
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
-			case <-time.After(ElectionTimeout):
+			case <-time.After(time.Duration(rand.Int63()%500)*time.Millisecond + ElectionTimeout):
 				//fmt.Printf("%v elect failure", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower

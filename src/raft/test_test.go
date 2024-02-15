@@ -122,7 +122,7 @@ func TestManyElections2A(t *testing.T) {
 		cfg.connect(i3)
 		//fmt.Printf("union %v %v %v\n", i1, i2, i3)
 
-		time.Sleep(RaftElectionTimeout / 10)
+		//time.Sleep(RaftElectionTimeout)
 	}
 
 	cfg.checkOneLeader()
