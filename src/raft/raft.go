@@ -71,7 +71,7 @@ type Raft struct {
 	LeaderHeartBeat bool
 	voteResult      chan int // 若能提前得知竞选结果，则立刻通知
 
-	commitIndex int
+	commitIndex int //commitIdx>=lastApplied
 	lastApplied int
 	nextIndex   []int
 	matchIndex  []int
@@ -168,7 +168,7 @@ type AppendEntriesArgs struct {
 	Term     int
 	LeaderId int
 
-	PreLogIndex  int
+	PreLogIndex  int //commit老的，同时request新的
 	PreLogTerm   int
 	Logs         []LogEntry
 	LeaderCommit int
@@ -196,6 +196,15 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		} else {
 			rf.mu.Unlock()
 		}
+		if mu != nil && reply.Success == true {
+			mu.Lock()
+			*agreed++
+			if *agreed > len(rf.peers)/2 {
+				ch <- 1
+			}
+			mu.Unlock()
+		}
+
 		return ok
 	}
 	return true
@@ -224,8 +233,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.LeaderHeartBeat = true
 			reply.Success = true
 			reply.Term = args.Term
+		} else {
+			// 日志更新
+			// 捎带确认，commit老的，append新的
+			rf.mu.Lock()
+			if rf.commitIndex < args.LeaderCommit {
+				for i := rf.commitIndex; i < args.LeaderCommit; i++ {
+					rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
+				}
+
+				rf.commitIndex = args.LeaderCommit
+				for i := 0; i < len(args.Logs); i++ {
+					rf.logs = append(rf.logs, args.Logs[i])
+				}
+
+			}
+			rf.mu.Unlock()
 		}
-		//TODO 接受日志更新
 	} else { // 选举成功/脑裂合并
 		//t := rf.term
 		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
@@ -362,12 +386,32 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.logs = append(rf.logs, LogEntry{cmd, rf.term})
+	mu := sync.Mutex{}
+	ch := make(chan int)
+	agreed := 1
+
+	args := AppendEntriesArgs{}
+	if len(rf.logs) == 1 {
+		args = AppendEntriesArgs{
+			rf.term, rf.me, 0, 0, []LogEntry{{cmd, rf.term}}, rf.commitIndex}
+	} else {
+		args = AppendEntriesArgs{
+			rf.term, rf.me, len(rf.logs) - 1, rf.logs[len(rf.logs)-2].Term, []LogEntry{{cmd, rf.term}}, rf.commitIndex}
+	}
 
 	for i, _ := range rf.peers {
-		args := AppendEntriesArgs{
-			rf.term, rf.me, len(rf.logs), rf.logs[len(rf.logs)-1].Term, []LogEntry{{cmd, rf.term}}, rf.commitIndex}
 		reply := AppendEntriesReply{}
-		go rf.sendAppendEntries(i, &args, &reply, nil, nil, nil)
+		go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
+	}
+
+	select { // 批准该commit
+	case <-ch:
+		rf.commitIndex++
+		rf.applyCh <- ApplyMsg{
+			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
+
+	case <-time.After(time.Duration(1000) * time.Millisecond):
+
 	}
 
 	return index, term, isLeader
@@ -505,6 +549,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.status = Follower
 	rf.votedFor = -1
 	rf.applyCh = applyCh
+	rf.commitIndex = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
