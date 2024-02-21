@@ -56,6 +56,42 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type RequestVoteArgs struct {
+	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
+}
+
+type RequestVoteReply struct {
+	// Your data here (2A).
+	Term        int
+	VoteGranted bool
+}
+
+type LogEntry struct {
+	Command interface{}
+	Term    int
+}
+
+type AppendEntriesArgs struct {
+	// Your data here (2A, 2B).
+	Term     int
+	LeaderId int
+
+	PreLogIndex  int //commit老的，同时request新的
+	PreLogTerm   int
+	Logs         []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	NextIndex int
+	Term      int
+	Success   bool
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -97,6 +133,25 @@ func max(x int, y int) int {
 	} else {
 		return y
 	}
+}
+
+// the tester doesn't halt goroutines created by Raft after each test,
+// but it does call the Kill() method. your code can use killed() to
+// check whether Kill() has been called. the use of atomic avoids the
+// need for a lock.
+//
+// the issue is that long-running goroutines use memory and may chew
+// up CPU time, perhaps causing later tests to fail and generating
+// confusing debug output. any goroutine with a long-running loop
+// should call killed() to check whether it should stop.
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
+	// Your code here, if desired.
+}
+
+func (rf *Raft) killed() bool {
+	z := atomic.LoadInt32(&rf.dead)
+	return z == 1
 }
 
 // return term and whether this server
@@ -160,42 +215,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-}
-
-type LogEntry struct {
-	Command interface{}
-	Term    int
-}
-
-type AppendEntriesArgs struct {
-	// Your data here (2A, 2B).
-	Term     int
-	LeaderId int
-
-	PreLogIndex  int //commit老的，同时request新的
-	PreLogTerm   int
-	Logs         []LogEntry
-	LeaderCommit int
-}
-
-type AppendEntriesReply struct {
-	// Your data here (2A).
-	Term    int
-	Success bool
-}
-
 // 发送心跳 / 日志更新消息
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, mu *sync.Mutex, ch chan int, agreed *int) bool {
 	if server != rf.me {
@@ -208,20 +227,22 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		if reply.Term > rf.term {
 			rf.term = reply.Term
 			rf.status = Follower
-			rf.mu.Unlock()
-		} else {
-			rf.mu.Unlock()
 		}
-		if mu != nil && reply.Success == true {
-			mu.Lock()
-			*agreed++
-			if *agreed > len(rf.peers)/2 {
-				ch <- 1
+		rf.mu.Unlock()
+		if mu != nil {
+			if reply.Success == true {
+				mu.Lock()
+				*agreed++
+				//fmt.Printf("svr%v agree \n", server)
+				if *agreed == len(rf.peers)/2+1 {
+					ch <- 1
+				}
+				mu.Unlock()
 			}
-			mu.Unlock()
+			rf.nextIndex[server] = reply.NextIndex
+			//fmt.Printf("svr%v nextIndex now is %v\n", server, rf.nextIndex[server])
 		}
-
-		return ok
+		return true
 	}
 	return true
 }
@@ -234,20 +255,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//注意这里的心跳可能是过期leader发来的心跳，要发出最新的term撤回其leader
 		reply.Success = false
 		reply.Term = rf.term
-	} else if rf.term == args.Term { //心跳 更新计时
+	} else if rf.term == args.Term { //心跳 / 日志更新
+		rf.LeaderHeartBeat = true
+		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  \n", rf.me, args.PreLogIndex, len(rf.logs)-1)
+		if !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) {
+			reply.Success = false
+			reply.Term = args.Term
+			reply.NextIndex = args.PreLogIndex // nextIndex--
+
+			return
+		}
 		if rf.commitIndex <= args.LeaderCommit {
-			// 心跳也可以充当捎带确认的作用，及时把已经agreed的logs告诉给Foller
+			// 及时把已经committed的logs告诉给Foller
+			//fmt.Printf("svr%v commitIndex:%v  LeaderCommit:%v  len(rf.logs):%v\n", rf.me, rf.commitIndex, args.LeaderCommit, len(rf.logs))
 			for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
+				//fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
 				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 			}
+			rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 		}
-		if len(args.Logs) == 0 && rf.status == Candidate {
-			// 选举过程中收到心跳则立刻掐死该次选举
-			rf.status = Follower
-			rf.votedFor = -1
-			rf.voteResult <- 1
-		} else {
-			// 日志更新,捎带确认，commit老的，append新的
+		if len(args.Logs) == 0 { // 心跳
+			if rf.status == Candidate {
+				// 选举过程中收到心跳则立刻掐死该次选举
+				rf.status = Follower
+				rf.votedFor = -1
+				rf.voteResult <- 1
+			}
+		} else { //日志更新
+			//fmt.Printf("args.PreLogIndex:%v  len(rf.logs)-1):%v  \n", args.PreLogIndex, len(rf.logs)-1)
+			// 捎带确认，commit老的，append新的
 			if rf.commitIndex <= args.LeaderCommit {
 				for i := 0; i < len(args.Logs); i++ {
 					rf.logs = append(rf.logs, args.Logs[i])
@@ -255,10 +291,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
-		rf.LeaderHeartBeat = true
-		rf.commitIndex = args.LeaderCommit
 		reply.Success = true
 		reply.Term = args.Term
+		reply.NextIndex = len(rf.logs)
 	} else { // 选举成功/脑裂合并
 		//t := rf.term
 		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
@@ -273,7 +308,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 }
 
-// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// 选举失败信息
@@ -350,7 +384,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if reply.VoteGranted == true {
 			mu.Lock()
 			*voted++
-			if *voted > len(rf.peers)/2 {
+			if *voted == len(rf.peers)/2+1 {
 				ch <- 1
 			}
 			mu.Unlock()
@@ -394,7 +428,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	for i, _ := range rf.peers {
 		args := AppendEntriesArgs{
-			rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, []LogEntry{{command, rf.term}}, rf.commitIndex}
+			rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 		reply := AppendEntriesReply{}
 		go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
 	}
@@ -407,29 +441,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
 
 	case <-time.After(time.Duration(1000) * time.Millisecond):
+		fmt.Printf("commit timeout: %v\n", rf.commitIndex+1)
 		//超时的就不commit了，但是部分Follower可能已经将其加入到logs里面了
 	}
 
 	return index, term, isLeader
-}
-
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-}
-
-func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
 }
 
 func (rf *Raft) HeartBeat() {
@@ -438,18 +454,15 @@ func (rf *Raft) HeartBeat() {
 		if rf.status == Leader {
 			rf.mu.Unlock()
 			//fmt.Printf("%v send heart beat\n", rf.me)
-
 			for i, _ := range rf.peers {
-				args := AppendEntriesArgs{rf.term, rf.me, 0, 0, nil, rf.commitIndex}
+				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 				reply := AppendEntriesReply{}
 				go rf.sendAppendEntries(i, &args, &reply, nil, nil, nil)
-
 			}
 		} else {
 			rf.mu.Unlock()
 			return
 		}
-
 		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 }
@@ -482,7 +495,6 @@ func (rf *Raft) ticker() {
 			// 等不到半数就一直等
 			// 除非已经有别的candidate选举成功为leader把当前candidate改为了follower，或者老leader复活等情况
 			// 导致当前选举一定会失败
-			// 使用select监听ch
 			select {
 			case <-rf.voteResult:
 				rf.mu.Lock()
@@ -493,7 +505,7 @@ func (rf *Raft) ticker() {
 					rf.votedFor = -1
 					l := len(rf.logs)
 					for i := 0; i < len(rf.peers); i++ {
-						rf.nextIndex[i] = l + 1
+						rf.nextIndex[i] = l
 						rf.matchIndex[i] = 0
 					}
 					rf.mu.Unlock()
