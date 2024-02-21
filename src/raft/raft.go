@@ -83,6 +83,22 @@ type Raft struct {
 
 }
 
+func min(x int, y int) int {
+	if x > y {
+		return y
+	} else {
+		return x
+	}
+}
+
+func max(x int, y int) int {
+	if x > y {
+		return x
+	} else {
+		return y
+	}
+}
+
 // return term and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -159,7 +175,7 @@ type RequestVoteReply struct {
 }
 
 type LogEntry struct {
-	Command string
+	Command interface{}
 	Term    int
 }
 
@@ -222,34 +238,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//心跳 更新计时
 			rf.mu.Lock()
 			if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
-				rf.mu.Unlock()
 				rf.status = Follower
 				rf.votedFor = -1
 				rf.voteResult <- 1
-			} else {
-				rf.mu.Unlock()
 			}
 			//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
-			rf.LeaderHeartBeat = true
-			reply.Success = true
-			reply.Term = args.Term
+			if rf.commitIndex < args.LeaderCommit {
+				// 心跳也可以充当捎带确认的作用，及时把已经agreed的logs告诉给Foller
+				for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
+					rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
+				}
+				rf.commitIndex = args.LeaderCommit
+			}
+
 		} else {
 			// 日志更新
 			// 捎带确认，commit老的，append新的
 			rf.mu.Lock()
-			if rf.commitIndex < args.LeaderCommit {
-				for i := rf.commitIndex; i < args.LeaderCommit; i++ {
+			if rf.commitIndex <= args.LeaderCommit {
+				for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
 					rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 				}
-
 				rf.commitIndex = args.LeaderCommit
 				for i := 0; i < len(args.Logs); i++ {
 					rf.logs = append(rf.logs, args.Logs[i])
 				}
-
 			}
-			rf.mu.Unlock()
 		}
+		rf.LeaderHeartBeat = true
+		rf.mu.Unlock()
+		reply.Success = true
+		reply.Term = args.Term
 	} else { // 选举成功/脑裂合并
 		//t := rf.term
 		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
@@ -378,26 +397,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Unlock()
 	}
 	isLeader = true
-	cmd, ok1 := command.(string)
-	_, ok2 := command.(int)
-	if !(ok1 || ok2) {
-		fmt.Printf("command %v is not a string or int", command)
-		return index, term, false
-	}
 
-	rf.logs = append(rf.logs, LogEntry{cmd, rf.term})
+	rf.logs = append(rf.logs, LogEntry{command, rf.term})
+	index = len(rf.logs) - 1
 	mu := sync.Mutex{}
 	ch := make(chan int)
 	agreed := 1
-
-	args := AppendEntriesArgs{}
-	if len(rf.logs) == 1 {
-		args = AppendEntriesArgs{
-			rf.term, rf.me, 0, 0, []LogEntry{{cmd, rf.term}}, rf.commitIndex}
-	} else {
-		args = AppendEntriesArgs{
-			rf.term, rf.me, len(rf.logs) - 1, rf.logs[len(rf.logs)-2].Term, []LogEntry{{cmd, rf.term}}, rf.commitIndex}
-	}
+	args := AppendEntriesArgs{
+		rf.term, rf.me, len(rf.logs) - 2, rf.logs[len(rf.logs)-2].Term, []LogEntry{{command, rf.term}}, rf.commitIndex}
 
 	for i, _ := range rf.peers {
 		reply := AppendEntriesReply{}
@@ -407,6 +414,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	select { // 批准该commit
 	case <-ch:
 		rf.commitIndex++
+		//fmt.Printf("committing %v", rf.commitIndex)
+
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
 
@@ -442,8 +451,9 @@ func (rf *Raft) HeartBeat() {
 		if rf.status == Leader {
 			rf.mu.Unlock()
 			//fmt.Printf("%v send heart beat\n", rf.me)
-			args := AppendEntriesArgs{rf.term, rf.me, 0, 0, nil, 0}
+
 			for i, _ := range rf.peers {
+				args := AppendEntriesArgs{rf.term, rf.me, 0, 0, nil, rf.commitIndex}
 				reply := AppendEntriesReply{}
 				go rf.sendAppendEntries(i, &args, &reply, nil, nil, nil)
 
@@ -500,7 +510,7 @@ func (rf *Raft) ticker() {
 						rf.matchIndex[i] = 0
 					}
 					rf.mu.Unlock()
-					//fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
+					fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
 					// 选举成功之后立马宣布
 					go rf.HeartBeat()
 				} else {
@@ -550,6 +560,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.applyCh = applyCh
 	rf.commitIndex = 0
+	rf.logs = []LogEntry{{nil, 0}}
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
