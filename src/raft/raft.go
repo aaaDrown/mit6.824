@@ -228,51 +228,40 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 // 选举成功 / Leader心跳 / 日志更新消息 handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.term > args.Term { //直接拒绝
 		//注意这里的心跳可能是过期leader发来的心跳，要发出最新的term撤回其leader
 		reply.Success = false
 		reply.Term = rf.term
-		return
-	} else if rf.term == args.Term {
-		if len(args.Logs) == 0 {
-			//心跳 更新计时
-			rf.mu.Lock()
-			if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
-				rf.status = Follower
-				rf.votedFor = -1
-				rf.voteResult <- 1
+	} else if rf.term == args.Term { //心跳 更新计时
+		if rf.commitIndex <= args.LeaderCommit {
+			// 心跳也可以充当捎带确认的作用，及时把已经agreed的logs告诉给Foller
+			for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
+				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 			}
-			//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
-			if rf.commitIndex < args.LeaderCommit {
-				// 心跳也可以充当捎带确认的作用，及时把已经agreed的logs告诉给Foller
-				for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
-					rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
-				}
-				rf.commitIndex = args.LeaderCommit
-			}
-
+		}
+		if len(args.Logs) == 0 && rf.status == Candidate {
+			// 选举过程中收到心跳则立刻掐死该次选举
+			rf.status = Follower
+			rf.votedFor = -1
+			rf.voteResult <- 1
 		} else {
-			// 日志更新
-			// 捎带确认，commit老的，append新的
-			rf.mu.Lock()
+			// 日志更新,捎带确认，commit老的，append新的
 			if rf.commitIndex <= args.LeaderCommit {
-				for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
-					rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
-				}
-				rf.commitIndex = args.LeaderCommit
 				for i := 0; i < len(args.Logs); i++ {
 					rf.logs = append(rf.logs, args.Logs[i])
 				}
 			}
 		}
+		//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
 		rf.LeaderHeartBeat = true
-		rf.mu.Unlock()
+		rf.commitIndex = args.LeaderCommit
 		reply.Success = true
 		reply.Term = args.Term
 	} else { // 选举成功/脑裂合并
 		//t := rf.term
 		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
-		rf.mu.Lock()
 		rf.LeaderHeartBeat = true
 		rf.votedFor = -1
 		rf.term = args.Term
@@ -281,7 +270,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.voteResult <- 1
 		}
 		rf.status = Follower
-		rf.mu.Unlock()
 	}
 }
 
@@ -403,10 +391,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	mu := sync.Mutex{}
 	ch := make(chan int)
 	agreed := 1
-	args := AppendEntriesArgs{
-		rf.term, rf.me, len(rf.logs) - 2, rf.logs[len(rf.logs)-2].Term, []LogEntry{{command, rf.term}}, rf.commitIndex}
 
 	for i, _ := range rf.peers {
+		args := AppendEntriesArgs{
+			rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, []LogEntry{{command, rf.term}}, rf.commitIndex}
 		reply := AppendEntriesReply{}
 		go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
 	}
@@ -414,13 +402,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	select { // 批准该commit
 	case <-ch:
 		rf.commitIndex++
-		//fmt.Printf("committing %v", rf.commitIndex)
-
+		//fmt.Printf("committing %v\n", rf.commitIndex)
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
 
 	case <-time.After(time.Duration(1000) * time.Millisecond):
-
+		//超时的就不commit了，但是部分Follower可能已经将其加入到logs里面了
 	}
 
 	return index, term, isLeader
