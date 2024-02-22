@@ -15,6 +15,11 @@ import "math/rand"
 import "sync/atomic"
 import "sync"
 
+const (
+	Reset = "\033[0m"
+	Green = "\033[32m"
+)
+
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
@@ -304,7 +309,9 @@ func TestFailAgree2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(107, servers, true)
 
+	fmt.Println(Green + "pass!!!" + Reset)
 	cfg.end()
+
 }
 
 func TestFailNoAgree2B(t *testing.T) {
@@ -337,6 +344,8 @@ func TestFailNoAgree2B(t *testing.T) {
 		t.Fatalf("%v committed but no majority", n)
 	}
 
+	fmt.Println(Green + "fuck!!!" + Reset)
+
 	// repair
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
@@ -345,13 +354,16 @@ func TestFailNoAgree2B(t *testing.T) {
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	leader2 := cfg.checkOneLeader()
+	fmt.Println(Green + "fuck!!!" + Reset)
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
+	fmt.Println(Green + "fuck!!!" + Reset)
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
+	fmt.Println(Green + "fuck!!!" + Reset)
 
 	cfg.one(1000, servers, true)
 

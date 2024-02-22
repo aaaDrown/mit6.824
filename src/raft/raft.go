@@ -218,10 +218,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // 发送心跳 / 日志更新消息
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, mu *sync.Mutex, ch chan int, agreed *int) bool {
 	if server != rf.me {
+		cnt := 1
 		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 		for !ok {
-			time.Sleep(10 * time.Millisecond)
+			cnt++
+			time.Sleep(20 * time.Millisecond)
 			ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
+			if cnt == 5 {
+				return false
+			}
 		}
 		rf.mu.Lock()
 		if reply.Term > rf.term {
@@ -229,18 +234,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.status = Follower
 		}
 		rf.mu.Unlock()
+
 		if mu != nil {
 			if reply.Success == true {
 				mu.Lock()
 				*agreed++
-				//fmt.Printf("svr%v agree \n", server)
+				fmt.Printf("svr%v agree \n", server)
 				if *agreed == len(rf.peers)/2+1 {
 					ch <- 1
 				}
 				mu.Unlock()
 			}
 			rf.nextIndex[server] = reply.NextIndex
-			//fmt.Printf("svr%v nextIndex now is %v\n", server, rf.nextIndex[server])
+			fmt.Printf("svr%v nextIndex now is %v\n", server, rf.nextIndex[server])
 		}
 		return true
 	}
@@ -257,19 +263,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.term
 	} else if rf.term == args.Term { //心跳 / 日志更新
 		rf.LeaderHeartBeat = true
-		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  \n", rf.me, args.PreLogIndex, len(rf.logs)-1)
-		if !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) {
+		fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
+		c1 := !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) && rf.commitIndex <= args.LeaderCommit
+		c2 := args.LeaderCommit == -1
+		if c1 || c2 {
+			if c2 {
+				t := len(rf.logs) - 1
+				rf.logs = rf.logs[:t]
+				reply.NextIndex = args.PreLogIndex + 1 // 上一个commit失败了，要撤回，nextIndex--
+			} else {
+				reply.NextIndex = args.PreLogIndex // 不匹配，nextIndex--
+			}
 			reply.Success = false
 			reply.Term = args.Term
-			reply.NextIndex = args.PreLogIndex // nextIndex--
 
 			return
 		}
+
 		if rf.commitIndex <= args.LeaderCommit {
 			// 及时把已经committed的logs告诉给Foller
-			//fmt.Printf("svr%v commitIndex:%v  LeaderCommit:%v  len(rf.logs):%v\n", rf.me, rf.commitIndex, args.LeaderCommit, len(rf.logs))
+			fmt.Printf("svr%v commitIndex:%v  LeaderCommit:%v  len(rf.logs):%v\n", rf.me, rf.commitIndex, args.LeaderCommit, len(rf.logs))
 			for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
-				//fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
+				fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
 				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 			}
 			rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
@@ -286,6 +301,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 捎带确认，commit老的，append新的
 			if rf.commitIndex <= args.LeaderCommit {
 				for i := 0; i < len(args.Logs); i++ {
+					fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
 					rf.logs = append(rf.logs, args.Logs[i])
 				}
 			}
@@ -436,13 +452,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	select { // 批准该commit
 	case <-ch:
 		rf.commitIndex++
-		//fmt.Printf("committing %v\n", rf.commitIndex)
+		fmt.Printf("committing %v\n", rf.commitIndex)
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
 
 	case <-time.After(time.Duration(1000) * time.Millisecond):
 		fmt.Printf("commit timeout: %v\n", rf.commitIndex+1)
-		//超时的就不commit了，但是部分Follower可能已经将其加入到logs里面了
+		//超时的就不commit了,且需要把log也给删掉，但是部分Follower可能已经将其加入到logs里面了,此时需要删除掉本次log
+		rf.logs = rf.logs[:rf.commitIndex+1]
+		for i, _ := range rf.peers {
+			rf.nextIndex[i] = min(rf.nextIndex[i], rf.commitIndex+1)
+			args := AppendEntriesArgs{
+				rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], -1}
+			reply := AppendEntriesReply{}
+			go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
+		}
 	}
 
 	return index, term, isLeader
@@ -453,7 +477,7 @@ func (rf *Raft) HeartBeat() {
 		rf.mu.Lock()
 		if rf.status == Leader {
 			rf.mu.Unlock()
-			//fmt.Printf("%v send heart beat\n", rf.me)
+			fmt.Printf("%v send heart beat\n", rf.me)
 			for i, _ := range rf.peers {
 				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 				reply := AppendEntriesReply{}
