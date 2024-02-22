@@ -328,6 +328,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
+	fmt.Println(Green + "disconnect!!!" + Reset)
 
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
@@ -344,26 +345,23 @@ func TestFailNoAgree2B(t *testing.T) {
 		t.Fatalf("%v committed but no majority", n)
 	}
 
-	fmt.Println(Green + "fuck!!!" + Reset)
-
 	// repair
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
 	cfg.connect((leader + 3) % servers)
+	fmt.Println(Green + "reconnect!!!" + Reset)
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	leader2 := cfg.checkOneLeader()
-	fmt.Println(Green + "fuck!!!" + Reset)
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
-	fmt.Println(Green + "fuck!!!" + Reset)
+
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
-	fmt.Println(Green + "fuck!!!" + Reset)
 
 	cfg.one(1000, servers, true)
 

@@ -218,15 +218,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // 发送心跳 / 日志更新消息
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, mu *sync.Mutex, ch chan int, agreed *int) bool {
 	if server != rf.me {
-		cnt := 1
+		//cnt := 1
 		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 		for !ok {
-			cnt++
-			time.Sleep(20 * time.Millisecond)
-			ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
-			if cnt == 5 {
-				return false
-			}
+			return false
+			//cnt++
+			//time.Sleep(20 * time.Millisecond)
+			//ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
+			//if cnt == 5 {
+			//	return false
+			//}
 		}
 		rf.mu.Lock()
 		if reply.Term > rf.term {
@@ -239,7 +240,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			if reply.Success == true {
 				mu.Lock()
 				*agreed++
-				fmt.Printf("svr%v agree \n", server)
+				fmt.Printf("svr%v agree on %v\n", server, args.Logs)
 				if *agreed == len(rf.peers)/2+1 {
 					ch <- 1
 				}
@@ -263,7 +264,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.term
 	} else if rf.term == args.Term { //心跳 / 日志更新
 		rf.LeaderHeartBeat = true
-		fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
+		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
 		c1 := !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) && rf.commitIndex <= args.LeaderCommit
 		c2 := args.LeaderCommit == -1
 		if c1 || c2 {
@@ -276,30 +277,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			reply.Success = false
 			reply.Term = args.Term
-
 			return
 		}
 
 		if rf.commitIndex <= args.LeaderCommit {
 			// 及时把已经committed的logs告诉给Foller
-			fmt.Printf("svr%v commitIndex:%v  LeaderCommit:%v  len(rf.logs):%v\n", rf.me, rf.commitIndex, args.LeaderCommit, len(rf.logs))
 			for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
 				fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
 				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 			}
 			rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		}
-		if len(args.Logs) == 0 { // 心跳
-			if rf.status == Candidate {
-				// 选举过程中收到心跳则立刻掐死该次选举
-				rf.status = Follower
-				rf.votedFor = -1
-				rf.voteResult <- 1
-			}
-		} else { //日志更新
-			//fmt.Printf("args.PreLogIndex:%v  len(rf.logs)-1):%v  \n", args.PreLogIndex, len(rf.logs)-1)
-			// 捎带确认，commit老的，append新的
-			if rf.commitIndex <= args.LeaderCommit {
+			if len(args.Logs) == 0 { // 心跳
+				if rf.status == Candidate {
+					// 选举过程中收到心跳则立刻掐死该次选举
+					rf.status = Follower
+					rf.votedFor = -1
+					rf.voteResult <- 1
+				}
+			} else { //日志更新
+				// 捎带确认，commit老的，append新的
 				for i := 0; i < len(args.Logs); i++ {
 					fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
 					rf.logs = append(rf.logs, args.Logs[i])
@@ -436,6 +432,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	isLeader = true
 
+	fmt.Printf("leader%v want to commit %v\n", rf.me, command)
 	rf.logs = append(rf.logs, LogEntry{command, rf.term})
 	index = len(rf.logs) - 1
 	mu := sync.Mutex{}
@@ -501,7 +498,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		if rf.LeaderHeartBeat == false && rf.status == Follower && rf.votedFor == -1 {
 			rf.mu.Unlock()
-			//fmt.Printf("%d receive no heart beat,begin electron,now term: %v\n", rf.me, rf.term)
+			fmt.Printf("%d receive no heart beat,begin electron,now term: %v\n", rf.me, rf.term)
 			voted := 1
 			rf.mu.Lock()
 			rf.status = Candidate
@@ -537,7 +534,7 @@ func (rf *Raft) ticker() {
 					// 选举成功之后立马宣布
 					go rf.HeartBeat()
 				} else {
-					//fmt.Printf("%v elect failure", rf.me)
+					fmt.Printf("%v elect failure", rf.me)
 					rf.status = Follower
 					rf.votedFor = -1
 					rf.mu.Unlock()
@@ -545,7 +542,7 @@ func (rf *Raft) ticker() {
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
 			case <-time.After(time.Duration(rand.Int63()%800+200) * time.Millisecond):
-				//fmt.Printf("%v elect failure", rf.me)
+				fmt.Printf("%v elect failure", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower
 				rf.votedFor = -1
