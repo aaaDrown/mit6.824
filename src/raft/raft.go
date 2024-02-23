@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -228,6 +227,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	rf.mu.Lock()
+	// term 或者log term不符合要求的话不能获得投票
 	c1 := rf.term > args.Term
 	c2 := (rf.logs[len(rf.logs)-1].Term > args.LastLogTerm) || ((rf.logs[len(rf.logs)-1].Term == args.LastLogTerm) && ((len(rf.logs) - 1) > args.LastLogIndex))
 	if c1 || c2 { // term不够
@@ -314,12 +314,17 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if reply.Term > rf.term {
+			//start可能会给刚复活的老leaderappend一些无效logs
+			//这里需要将老leader的无效logs给清空
+			//不然会被新leader的commitIndex给误commit
 			rf.term = reply.Term
 			rf.status = Follower
+			idx := min(len(rf.logs)-1, rf.commitIndex+1)
+			rf.logs = rf.logs[:idx]
 			return true
 		}
 		rf.nextIndex[server] += reply.AppendIndex
-		fmt.Printf("%v nextIndex now is %v\n", server, rf.nextIndex[server])
+		//fmt.Printf("%v nextIndex now is %v\n", server, rf.nextIndex[server])
 
 		if len(args.Logs) > 0 {
 			cnt := 0
@@ -331,11 +336,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 			if cnt > len(rf.peers)/2 {
 				for j := rf.commitIndex + 1; j < rf.nextIndex[server]; j++ {
-					fmt.Printf("leader %v with commitIndex%v now committing %v\n", rf.me, rf.commitIndex, rf.logs[j].Command)
+					//fmt.Printf("leader %v with commitIndex%v now committing %v\n", rf.me, rf.commitIndex, rf.logs[j].Command)
 					rf.applyCh <- ApplyMsg{true, rf.logs[j].Command, j, false, nil, 0, 0}
 				}
 				rf.commitIndex = max(rf.nextIndex[server]-1, rf.commitIndex)
-				fmt.Printf("%v commitIndex now is %v\n", rf.me, rf.commitIndex)
+				//fmt.Printf("%v commitIndex now is %v\n", rf.me, rf.commitIndex)
 			}
 			return true
 		}
@@ -347,6 +352,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	f := false
+	if args.PreLogIndex > len(rf.logs)-1 {
+		f = true
+	} else {
+		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
+		//所以如果直接判断else的话可能会数组越界
+		if args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
+			f = true
+		}
+	}
+	if f && rf.term <= args.Term {
+		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
+		//idx := min(len(rf.logs)-1, rf.commitIndex+1)
+		rf.logs = rf.logs[:rf.commitIndex+1]
+		reply.AppendIndex = -1 // 不匹配，nextIndex--
+		reply.Success = true
+		reply.Term = args.Term
+		return
+	}
 	if rf.term > args.Term { //直接拒绝
 		//注意这里的心跳可能是过期leader发来的心跳，要发出最新的term撤回其leader
 		reply.Success = false
@@ -355,21 +380,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.LeaderHeartBeat = true
 		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
 		//condition1表示参数与当前follower不match
-		// 1   2   3   4
-		//101 103
-		//101 102 103 104
-		if !(args.PreLogTerm == rf.logs[args.PreLogIndex].Term) {
-			fmt.Printf("%v PreLogIndex %v term is %v ,not matching args.PreLogTerm %v\n\n\n", rf.me, args.PreLogIndex, rf.logs[args.PreLogIndex].Term, args.PreLogTerm)
-			idx := min(len(rf.logs)-1, rf.commitIndex+1)
-			rf.logs = rf.logs[:idx]
-			reply.AppendIndex = -1 // 不匹配，nextIndex--
-			reply.Success = true
-			reply.Term = args.Term
-			return
-		}
 		// 及时把已经committed的logs告诉给Foller
 		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
-			fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
+			//fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
 			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 		}
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
@@ -383,7 +396,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else { //日志更新
 			// 捎带确认，commit老的，append新的
 			for i := 0; i < len(args.Logs); i++ {
-				fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
+				//fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
 				if args.PreLogIndex+i+1 == len(rf.logs) {
 					rf.logs = append(rf.logs, args.Logs[i])
 				} else if args.PreLogIndex+i+1 < len(rf.logs) {
@@ -434,7 +447,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 	isLeader = true
-	fmt.Printf("%v append %v\n", rf.me, command)
+	//fmt.Printf("%v append %v\n", rf.me, command)
 	rf.logs = append(rf.logs, LogEntry{command, rf.term})
 	index = len(rf.logs) - 1
 	term = rf.term
@@ -450,7 +463,7 @@ func (rf *Raft) LeaderSend() {
 			rf.mu.Unlock()
 			//fmt.Printf("%v send heart beat\n", rf.me)
 			for i, _ := range rf.peers {
-				fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.me, i, rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
+				//fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.me, i, rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
 				rf.mu.Lock()
 				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 				reply := AppendEntriesReply{}
@@ -506,7 +519,7 @@ func (rf *Raft) ticker() {
 						rf.matchIndex[i] = 0
 					}
 					rf.mu.Unlock()
-					fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
+					//fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
 					// 选举成功之后立马宣布
 					go rf.LeaderSend()
 				} else {
