@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -214,113 +215,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// 发送心跳 / 日志更新消息
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, mu *sync.Mutex, ch chan int, agreed *int) bool {
-	if server != rf.me {
-		//cnt := 1
-		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-		for !ok {
-			return false
-			//cnt++
-			//time.Sleep(20 * time.Millisecond)
-			//ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
-			//if cnt == 5 {
-			//	return false
-			//}
-		}
-		rf.mu.Lock()
-		if reply.Term > rf.term {
-			rf.term = reply.Term
-			rf.status = Follower
-		}
-		rf.mu.Unlock()
-
-		if mu != nil {
-			if reply.Success == true {
-				mu.Lock()
-				*agreed++
-				//fmt.Printf("svr%v agree on %v\n", server, args.Logs)
-				if *agreed == len(rf.peers)/2+1 {
-					ch <- 1
-				}
-				mu.Unlock()
-			}
-			rf.nextIndex[server] = reply.NextIndex
-			//fmt.Printf("svr%v nextIndex now is %v\n", server, rf.nextIndex[server])
-		}
-		return true
-	}
-	return true
-}
-
-// 选举成功 / Leader心跳 / 日志更新消息 handler
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.term > args.Term { //直接拒绝
-		//注意这里的心跳可能是过期leader发来的心跳，要发出最新的term撤回其leader
-		reply.Success = false
-		reply.Term = rf.term
-	} else if rf.term == args.Term { //心跳 / 日志更新
-		rf.LeaderHeartBeat = true
-		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
-		c1 := !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) && rf.commitIndex <= args.LeaderCommit
-		c2 := args.LeaderCommit == -1
-		if c1 || c2 {
-			if c2 {
-				t := len(rf.logs) - 1
-				rf.logs = rf.logs[:t]
-				reply.NextIndex = args.PreLogIndex + 1 // 上一个commit失败了，要撤回，nextIndex--
-			} else {
-				reply.NextIndex = args.PreLogIndex // 不匹配，nextIndex--
-			}
-			reply.Success = false
-			reply.Term = args.Term
-			return
-		}
-
-		if rf.commitIndex <= args.LeaderCommit {
-			// 及时把已经committed的logs告诉给Foller
-			for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
-				//fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
-				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
-			}
-			rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-			if len(args.Logs) == 0 { // 心跳
-				if rf.status == Candidate {
-					// 选举过程中收到心跳则立刻掐死该次选举
-					rf.status = Follower
-					rf.votedFor = -1
-					rf.voteResult <- 1
-				}
-			} else { //日志更新
-				// 捎带确认，commit老的，append新的
-				for i := 0; i < len(args.Logs); i++ {
-					//fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
-					rf.logs = append(rf.logs, args.Logs[i])
-				}
-			}
-		}
-		//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
-		reply.Success = true
-		reply.Term = args.Term
-		reply.NextIndex = len(rf.logs)
-	} else { // 选举成功/脑裂合并
-		//t := rf.term
-		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
-		rf.LeaderHeartBeat = true
-		rf.votedFor = -1
-		rf.term = args.Term
-		if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
-			rf.status = Follower
-			rf.voteResult <- 1
-		}
-		rf.status = Follower
-	}
-}
-
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
 	// 选举失败信息
 	if args.Term == -1 {
 		rf.mu.Lock()
@@ -388,9 +283,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, mu *sync.Mutex, ch chan int, voted *int) bool {
 	if server != rf.me {
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-		for !ok {
-			time.Sleep(10 * time.Millisecond)
-			ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
+		if !ok {
+			return false
 		}
 		if reply.VoteGranted == true {
 			mu.Lock()
@@ -403,6 +297,109 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		return ok
 	}
 	return true
+}
+
+// 发送心跳 / 日志更新消息
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, mu *sync.Mutex, ch chan int, agreed *int) bool {
+	if server != rf.me {
+		//如果network被切断，这里会被阻塞相当长的一段时间
+		//考虑到上述原因，这里一旦调用失败直接返回，不再追加
+		//而错过的log由leader的heartbeat来补偿
+		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		if !ok {
+			return false
+		}
+		///rf.mu.Lock()
+		if reply.Term > rf.term {
+			rf.term = reply.Term
+			rf.status = Follower
+		}
+		//rf.mu.Unlock()
+
+		if mu != nil {
+			if reply.Success == true {
+				mu.Lock()
+				*agreed++
+				fmt.Printf("svr%v agree on %v\n", server, args.Logs)
+				if *agreed == len(rf.peers)/2+1 {
+					ch <- 1
+				}
+				mu.Unlock()
+			}
+			rf.nextIndex[server] = reply.NextIndex
+			fmt.Printf("svr%v nextIndex now is %v\n", server, rf.nextIndex[server])
+		}
+		return true
+	}
+	return true
+}
+
+// 选举成功 / Leader心跳 / 日志更新消息 handler
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.term > args.Term { //直接拒绝
+		//注意这里的心跳可能是过期leader发来的心跳，要发出最新的term撤回其leader
+		reply.Success = false
+		reply.Term = rf.term
+	} else if rf.term == args.Term { //心跳 / 日志更新
+		rf.LeaderHeartBeat = true
+		fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
+		//condition1表示参数与当前followerbumatch
+		c1 := !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) && rf.commitIndex <= args.LeaderCommit
+		//condition2表示leader发来的commit timeout，撤回这个log
+		c2 := args.LeaderCommit == -1
+		if c1 || c2 {
+			if c2 {
+				t := len(rf.logs) - 1
+				rf.logs = rf.logs[:t]
+				reply.NextIndex = args.PreLogIndex + 1 // 上一个commit失败了，要撤回
+			} else {
+				reply.NextIndex = args.PreLogIndex // 不匹配，nextIndex--
+			}
+			reply.Success = false
+			reply.Term = args.Term
+			return
+		}
+
+		if rf.commitIndex <= args.LeaderCommit {
+			// 及时把已经committed的logs告诉给Foller
+			for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
+				fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
+				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
+			}
+			rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+			if len(args.Logs) == 0 { // 心跳
+				if rf.status == Candidate {
+					// 选举过程中收到心跳则立刻掐死该次选举
+					rf.status = Follower
+					rf.votedFor = -1
+					rf.voteResult <- 1
+				}
+			} else { //日志更新
+				// 捎带确认，commit老的，append新的
+				for i := 0; i < len(args.Logs); i++ {
+					fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
+					rf.logs = append(rf.logs, args.Logs[i])
+				}
+			}
+		}
+		//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
+		reply.Success = true
+		reply.Term = args.Term
+		reply.NextIndex = len(rf.logs)
+	} else { // 选举成功/脑裂合并
+		//t := rf.term
+		//fmt.Printf("%v update term from %v to %v\n", rf.me, t, args.Term)
+		rf.LeaderHeartBeat = true
+		rf.votedFor = -1
+		rf.term = args.Term
+		if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
+			rf.status = Follower
+			rf.voteResult <- 1
+		}
+		rf.status = Follower
+	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -418,20 +415,18 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// Your code here (2B).
+
 	index := -1
 	term := -1
 	isLeader := false
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.status != Leader {
-		rf.mu.Unlock()
 		return index, term, isLeader
-	} else {
-		rf.mu.Unlock()
 	}
 	isLeader = true
 
-	//fmt.Printf("leader%v want to commit %v\n", rf.me, command)
+	fmt.Printf("leader%v want to commit %v\n", rf.me, command)
 	rf.logs = append(rf.logs, LogEntry{command, rf.term})
 	index = len(rf.logs) - 1
 	mu := sync.Mutex{}
@@ -448,12 +443,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	select { // 批准该commit
 	case <-ch:
 		rf.commitIndex++
-		//fmt.Printf("committing %v\n", rf.commitIndex)
+		fmt.Printf("committing %v\n", rf.commitIndex)
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
 
 	case <-time.After(time.Duration(1000) * time.Millisecond):
-		//fmt.Printf("commit timeout: %v\n", rf.commitIndex+1)
+		fmt.Printf("commit timeout: %v\n", rf.commitIndex+1)
 		//超时的就不commit了,且需要把log也给删掉，但是部分Follower可能已经将其加入到logs里面了,此时需要删除掉本次log
 		rf.logs = rf.logs[:rf.commitIndex+1]
 		for i, _ := range rf.peers {
@@ -464,8 +459,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
 		}
 	}
-	time.Sleep(20 * time.Millisecond)
-
+	//每一个append的调用不要过早退出
+	//给其他的follower一些时间来记录log并更新nextIndex
+	time.Sleep(10 * time.Millisecond)
 	return index, term, isLeader
 }
 
@@ -492,7 +488,6 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		ms := 150 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-		// Your code here (2A)
 		// Check if a leader election should be started.
 		// 若sleep过程中没有接收到心跳，则发起选举
 		rf.mu.Lock()
@@ -530,7 +525,7 @@ func (rf *Raft) ticker() {
 						rf.matchIndex[i] = 0
 					}
 					rf.mu.Unlock()
-					//fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
+					fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
 					// 选举成功之后立马宣布
 					go rf.HeartBeat()
 				} else {
