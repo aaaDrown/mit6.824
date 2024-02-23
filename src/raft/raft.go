@@ -309,7 +309,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		if !ok {
 			return false
 		}
-		///rf.mu.Lock()
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if reply.Term > rf.term {
 			rf.term = reply.Term
 			rf.status = Follower
@@ -346,16 +347,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
 		//condition1表示参数与当前followerbumatch
 		c1 := !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) && rf.commitIndex <= args.LeaderCommit
-		//condition2表示leader发来的commit timeout，撤回这个log
-		c2 := args.LeaderCommit == -1
-		if c1 || c2 {
-			if c2 {
-				t := len(rf.logs) - 1
-				rf.logs = rf.logs[:t]
-				reply.NextIndex = args.PreLogIndex + 1 // 上一个commit失败了，要撤回
-			} else {
-				reply.NextIndex = args.PreLogIndex // 不匹配，nextIndex--
-			}
+		if c1 {
+			reply.NextIndex = args.PreLogIndex // 不匹配，nextIndex--
 			reply.Success = false
 			reply.Term = args.Term
 			return
@@ -440,8 +433,10 @@ func (rf *Raft) LeaderSend() {
 			//fmt.Printf("%v send heart beat\n", rf.me)
 			for i, _ := range rf.peers {
 				//fmt.Printf("rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
+				rf.mu.Lock()
 				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 				reply := AppendEntriesReply{NextIndex: rf.nextIndex[i]}
+				rf.mu.Unlock()
 				go rf.sendAppendEntries(i, &args, &reply)
 			}
 		} else {
