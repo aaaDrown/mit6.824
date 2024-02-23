@@ -300,7 +300,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 // 发送心跳 / 日志更新消息
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, mu *sync.Mutex, ch chan int, agreed *int) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	if server != rf.me {
 		//如果network被切断，这里会被阻塞相当长的一段时间
 		//考虑到上述原因，这里一旦调用失败直接返回，不再追加
@@ -314,20 +314,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.term = reply.Term
 			rf.status = Follower
 		}
-		//rf.mu.Unlock()
-
-		if mu != nil {
-			if reply.Success == true {
-				mu.Lock()
-				*agreed++
-				fmt.Printf("svr%v agree on %v\n", server, args.Logs)
-				if *agreed == len(rf.peers)/2+1 {
-					ch <- 1
-				}
-				mu.Unlock()
+		rf.nextIndex[server] = reply.NextIndex
+		cnt := 0
+		for i := 0; i < len(rf.peers); i++ {
+			if rf.nextIndex[i] >= reply.NextIndex {
+				cnt++
 			}
-			rf.nextIndex[server] = reply.NextIndex
-			fmt.Printf("svr%v nextIndex now is %v\n", server, rf.nextIndex[server])
+		}
+		if cnt > len(rf.peers)/2 {
+			for j := rf.commitIndex + 1; j < reply.NextIndex; j++ {
+				fmt.Printf("leader %v committing %v\n", rf.me, rf.logs[j].Command)
+				rf.applyCh <- ApplyMsg{true, rf.logs[j].Command, j, false, nil, 0, 0}
+			}
+			rf.commitIndex = reply.NextIndex - 1
 		}
 		return true
 	}
@@ -344,7 +343,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.term
 	} else if rf.term == args.Term { //心跳 / 日志更新
 		rf.LeaderHeartBeat = true
-		fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
+		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
 		//condition1表示参数与当前followerbumatch
 		c1 := !((args.PreLogIndex == len(rf.logs)-1) && (args.PreLogTerm == rf.logs[args.PreLogIndex].Term)) && rf.commitIndex <= args.LeaderCommit
 		//condition2表示leader发来的commit timeout，撤回这个log
@@ -425,56 +424,25 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 	isLeader = true
-
-	fmt.Printf("leader%v want to commit %v\n", rf.me, command)
 	rf.logs = append(rf.logs, LogEntry{command, rf.term})
 	index = len(rf.logs) - 1
-	mu := sync.Mutex{}
-	ch := make(chan int)
-	agreed := 1
-
-	for i, _ := range rf.peers {
-		args := AppendEntriesArgs{
-			rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
-		reply := AppendEntriesReply{}
-		go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
-	}
-
-	select { // 批准该commit
-	case <-ch:
-		rf.commitIndex++
-		fmt.Printf("committing %v\n", rf.commitIndex)
-		rf.applyCh <- ApplyMsg{
-			CommandValid: true, Command: command, CommandIndex: rf.commitIndex, SnapshotValid: false, Snapshot: nil, SnapshotTerm: 0, SnapshotIndex: 0}
-
-	case <-time.After(time.Duration(1000) * time.Millisecond):
-		fmt.Printf("commit timeout: %v\n", rf.commitIndex+1)
-		//超时的就不commit了,且需要把log也给删掉，但是部分Follower可能已经将其加入到logs里面了,此时需要删除掉本次log
-		rf.logs = rf.logs[:rf.commitIndex+1]
-		for i, _ := range rf.peers {
-			rf.nextIndex[i] = min(rf.nextIndex[i], rf.commitIndex+1)
-			args := AppendEntriesArgs{
-				rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], -1}
-			reply := AppendEntriesReply{}
-			go rf.sendAppendEntries(i, &args, &reply, &mu, ch, &agreed)
-		}
-	}
-	//每一个append的调用不要过早退出
-	//给其他的follower一些时间来记录log并更新nextIndex
-	time.Sleep(10 * time.Millisecond)
+	term = rf.term
+	rf.nextIndex[rf.me]++
+	// start最后的结果不一定commit了，具体的append放在HeartBeat中处理
 	return index, term, isLeader
 }
 
-func (rf *Raft) HeartBeat() {
+func (rf *Raft) LeaderSend() {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		if rf.status == Leader {
 			rf.mu.Unlock()
 			//fmt.Printf("%v send heart beat\n", rf.me)
 			for i, _ := range rf.peers {
+				//fmt.Printf("rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
 				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
-				reply := AppendEntriesReply{}
-				go rf.sendAppendEntries(i, &args, &reply, nil, nil, nil)
+				reply := AppendEntriesReply{NextIndex: rf.nextIndex[i]}
+				go rf.sendAppendEntries(i, &args, &reply)
 			}
 		} else {
 			rf.mu.Unlock()
@@ -486,7 +454,7 @@ func (rf *Raft) HeartBeat() {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		ms := 150 + (rand.Int63() % 200)
+		ms := 200 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		// Check if a leader election should be started.
 		// 若sleep过程中没有接收到心跳，则发起选举
@@ -527,7 +495,7 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 					fmt.Printf("%d begin leader,now term %v \n", rf.me, rf.term)
 					// 选举成功之后立马宣布
-					go rf.HeartBeat()
+					go rf.LeaderSend()
 				} else {
 					//fmt.Printf("%v elect failure\n", rf.me)
 					rf.status = Follower
