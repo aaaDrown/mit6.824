@@ -216,43 +216,38 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 选举失败信息
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term == -1 {
-		rf.mu.Lock()
 		if args.CandidateId == rf.votedFor {
 			rf.votedFor = -1
-			rf.mu.Unlock()
-		} else {
-			rf.mu.Unlock()
+			return
 		}
-		return
 	}
-	rf.mu.Lock()
 	// term 或者log term不符合要求的话不能获得投票
 	c1 := rf.term > args.Term
 	c2 := (rf.logs[len(rf.logs)-1].Term > args.LastLogTerm) || ((rf.logs[len(rf.logs)-1].Term == args.LastLogTerm) && ((len(rf.logs) - 1) > args.LastLogIndex))
 	if c1 || c2 { // term不够
-		rf.mu.Unlock()
 		reply.VoteGranted = false
-		reply.Term = rf.term
 		//fmt.Printf("%v refuse vote for %v, now term %v, args:%v,len(rf.logs):%v \n", rf.me, args.CandidateId, rf.term, args, len(rf.logs))
 	} else if rf.term == args.Term {
 		if rf.votedFor == -1 && rf.status == Follower {
 			rf.votedFor = args.CandidateId
-			rf.mu.Unlock()
 			//fmt.Printf("%v voted for %v, now term %v\n", rf.me, args.CandidateId, rf.term)
 			reply.VoteGranted = true
-			reply.Term = args.Term
-		} else {
-			rf.mu.Unlock()
 		}
 	} else { // rf.term < args.Term 此时必须同意
-		rf.status = Follower
+		if rf.status != Follower {
+			idx := min(len(rf.logs), rf.commitIndex+1)
+			rf.logs = rf.logs[:idx]
+			rf.status = Follower
+			if rf.status == Candidate {
+				rf.voteResult <- 1
+			}
+		}
 		rf.term = args.Term
 		rf.votedFor = args.CandidateId
-		rf.mu.Unlock()
 		reply.VoteGranted = true
-		reply.Term = args.Term
-
 	}
 }
 
@@ -468,10 +463,8 @@ func (rf *Raft) LeaderSend() {
 			//fmt.Printf("%v send heart beat\n", rf.me)
 			for i, _ := range rf.peers {
 				//fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.me, i, rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
-				rf.mu.Lock()
 				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 				reply := AppendEntriesReply{}
-				rf.mu.Unlock()
 				go rf.sendAppendEntries(i, &args, &reply)
 			}
 		} else {
@@ -484,7 +477,7 @@ func (rf *Raft) LeaderSend() {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		ms := 200 + (rand.Int63() % 200)
+		ms := 150 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		// Check if a leader election should be started.
 		// 若sleep过程中没有接收到心跳，则发起选举
@@ -534,7 +527,7 @@ func (rf *Raft) ticker() {
 				}
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
-			case <-time.After(time.Duration(rand.Int63()%800+200) * time.Millisecond):
+			case <-time.After(time.Duration(rand.Int63()%600+200) * time.Millisecond):
 				//fmt.Printf("%v timeout elect failure\n", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower
