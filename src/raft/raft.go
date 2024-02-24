@@ -234,6 +234,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.mu.Unlock()
 		reply.VoteGranted = false
 		reply.Term = rf.term
+		//fmt.Printf("%v refuse vote for %v, now term %v, args:%v,len(rf.logs):%v \n", rf.me, args.CandidateId, rf.term, args, len(rf.logs))
 	} else if rf.term == args.Term {
 		if rf.votedFor == -1 && rf.status == Follower {
 			rf.votedFor = args.CandidateId
@@ -319,7 +320,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			//不然会被新leader的commitIndex给误commit
 			rf.term = reply.Term
 			rf.status = Follower
-			idx := min(len(rf.logs)-1, rf.commitIndex+1)
+			idx := min(len(rf.logs), rf.commitIndex+1)
 			rf.logs = rf.logs[:idx]
 			return true
 		}
@@ -368,6 +369,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//idx := min(len(rf.logs)-1, rf.commitIndex+1)
 		rf.logs = rf.logs[:rf.commitIndex+1]
 		reply.AppendIndex = -1 // 不匹配，nextIndex--
+		rf.LeaderHeartBeat = true
 		reply.Success = true
 		reply.Term = args.Term
 		return
@@ -416,6 +418,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.LeaderHeartBeat = true
 		rf.votedFor = -1
 		rf.term = args.Term
+		idx := min(len(rf.logs), rf.commitIndex+1)
+		rf.logs = rf.logs[:idx]
 		if rf.status == Candidate { // 选举过程中收到心跳则立刻掐死该次选举
 			rf.status = Follower
 			rf.voteResult <- 1
@@ -531,7 +535,7 @@ func (rf *Raft) ticker() {
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
 			case <-time.After(time.Duration(rand.Int63()%800+200) * time.Millisecond):
-				//fmt.Printf("%v elect failure\n", rf.me)
+				//fmt.Printf("%v timeout elect failure\n", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower
 				rf.votedFor = -1
