@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -36,6 +38,7 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
+
 const (
 	Candidate = iota
 	Follower
@@ -160,7 +163,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var leader bool
-	// Your code here (2A).
 	rf.mu.Lock()
 	term = rf.term
 	leader = rf.status == Leader
@@ -177,33 +179,38 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	//println("\033[32m" + "save" + "\033[0m")
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+	//println("\033[32m" + "read" + "\033[0m")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var votedFor int
+	var logs []LogEntry
+
+	if d.Decode(&term) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		println("something wrong in decode")
+	} else {
+		//fmt.Printf("%v read persist: term %v, votedFor %v, logs %v\n", rf.me, term, votedFor, logs)
+		rf.term = term
+		rf.votedFor = votedFor
+		rf.logs = logs
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -325,9 +332,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		} else {
 			rf.nextIndex[server] = max(rf.nextIndex[server]+reply.AppendIndex, 1)
 		}
-
 		//fmt.Printf("%v nextIndex now is %v\n", server, rf.nextIndex[server])
-
 		if len(args.Logs) > 0 {
 			cnt := 0
 			for i := 0; i < len(rf.peers); i++ {
@@ -337,12 +342,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			}
 
 			if cnt > len(rf.peers)/2 {
+				f := 0
 				for j := rf.commitIndex + 1; j < rf.nextIndex[server]; j++ {
+					f = 1
 					//fmt.Printf("leader %v with commitIndex%v now committing %v\n", rf.me, rf.commitIndex, rf.logs[j].Command)
 					rf.applyCh <- ApplyMsg{true, rf.logs[j].Command, j, false, nil, 0, 0}
 				}
-				rf.commitIndex = max(rf.nextIndex[server]-1, rf.commitIndex)
-				//fmt.Printf("%v commitIndex now is %v\n", rf.me, rf.commitIndex)
+				if f == 1 {
+					rf.persist()
+				}
+				if rf.nextIndex[server]-1 > rf.commitIndex {
+					rf.commitIndex = rf.nextIndex[server] - 1
+					//fmt.Printf("%v commitIndex now is %v\n", rf.me, rf.commitIndex)
+				}
 			}
 			return true
 		}
@@ -354,18 +366,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	f := 0
 
-	f := false
+	crash := false
 	if args.PreLogIndex > len(rf.logs)-1 {
-		f = true
+		crash = true
 	} else {
 		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
 		//所以如果直接判断else的话可能会数组越界
 		if args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
-			f = true
+			crash = true
 		}
 	}
-	if f && rf.term <= args.Term {
+	if crash && rf.term <= args.Term {
 		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
 		//idx := min(len(rf.logs)-1, rf.commitIndex+1)
 		rf.logs = rf.logs[:rf.commitIndex+1]
@@ -386,6 +399,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//condition1表示参数与当前follower不match
 		// 及时把已经committed的logs告诉给Foller
 		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
+			f = 1
 			//fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
 			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 		}
@@ -409,6 +423,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					println("something wrong in appendEntry")
 				}
 			}
+			f = 1
 		}
 		//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
 		reply.Success = true
@@ -427,6 +442,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.voteResult <- 1
 		}
 		rf.status = Follower
+		f = 1
+	}
+
+	if f == 1 {
+		rf.persist()
 	}
 }
 
@@ -459,6 +479,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.term
 	rf.nextIndex[rf.me]++
 	// start最后的结果不一定commit了，具体的append放在HeartBeat中处理
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -545,8 +566,8 @@ func (rf *Raft) ticker() {
 					reply := RequestVoteReply{}
 					go rf.sendRequestVote(i, &args, &reply, &mu, rf.voteResult, &voted)
 				}
-
 			}
+			rf.persist()
 		} else {
 			rf.LeaderHeartBeat = false
 			rf.mu.Unlock()
