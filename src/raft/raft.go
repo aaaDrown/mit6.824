@@ -223,9 +223,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	defer rf.persist()
 	// 选举失败信息
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.Term = rf.term
 	if args.Term == -1 {
 		if args.CandidateId == rf.votedFor {
 			rf.votedFor = -1
@@ -246,8 +248,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	} else { // rf.term < args.Term 此时必须同意
 		if rf.status != Follower {
-			idx := min(len(rf.logs), rf.commitIndex+1)
-			rf.logs = rf.logs[:idx]
 			rf.status = Follower
 			if rf.status == Candidate {
 				rf.voteResult <- 1
@@ -287,8 +287,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, mu *sync.Mutex, ch chan int, voted *int) bool {
+	defer rf.persist()
 	if server != rf.me {
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		if reply.Term > rf.term {
+			rf.term = reply.Term
+		}
 		if !ok {
 			return false
 		}
@@ -307,6 +311,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // 发送心跳 / 日志更新消息
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	defer rf.persist()
 	if server != rf.me {
 		//如果network被切断，这里会被阻塞相当长的一段时间
 		//考虑到上述原因，这里一旦调用失败直接返回，不再追加
@@ -342,14 +347,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			}
 
 			if cnt > len(rf.peers)/2 {
-				f := 0
 				for j := rf.commitIndex + 1; j < rf.nextIndex[server]; j++ {
-					f = 1
 					//fmt.Printf("leader %v with commitIndex%v now committing %v\n", rf.me, rf.commitIndex, rf.logs[j].Command)
 					rf.applyCh <- ApplyMsg{true, rf.logs[j].Command, j, false, nil, 0, 0}
-				}
-				if f == 1 {
-					rf.persist()
 				}
 				if rf.nextIndex[server]-1 > rf.commitIndex {
 					rf.commitIndex = rf.nextIndex[server] - 1
@@ -366,7 +366,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	f := 0
+	defer rf.persist()
 
 	crash := false
 	if args.PreLogIndex > len(rf.logs)-1 {
@@ -399,7 +399,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//condition1表示参数与当前follower不match
 		// 及时把已经committed的logs告诉给Foller
 		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
-			f = 1
 			//fmt.Printf("svr%v applying %v\n", rf.me, rf.logs[i].Command)
 			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 		}
@@ -423,7 +422,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					println("something wrong in appendEntry")
 				}
 			}
-			f = 1
 		}
 		//fmt.Printf("%v received heart beat from %v\n", rf.me, args.LeaderId)
 		reply.Success = true
@@ -442,11 +440,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.voteResult <- 1
 		}
 		rf.status = Follower
-		f = 1
-	}
-
-	if f == 1 {
-		rf.persist()
 	}
 }
 
@@ -555,7 +548,7 @@ func (rf *Raft) ticker() {
 				}
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
-			case <-time.After(time.Duration(rand.Int63()%600+200) * time.Millisecond):
+			case <-time.After(time.Duration(rand.Int63()%700+300) * time.Millisecond):
 				//fmt.Printf("%v timeout elect failure\n", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower

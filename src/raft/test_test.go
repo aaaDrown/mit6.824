@@ -8,11 +8,13 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"sync/atomic"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
-import "sync/atomic"
 import "sync"
 
 const (
@@ -856,6 +858,7 @@ func TestFigure82C(t *testing.T) {
 		if leader != -1 {
 			cfg.crash1(leader)
 			nup -= 1
+			//fmt.Printf(Green+"kill %v, nup now is %v\n"+Reset, leader, nup)
 		}
 
 		if nup < 3 {
@@ -864,6 +867,7 @@ func TestFigure82C(t *testing.T) {
 				cfg.start1(s, cfg.applier)
 				cfg.connect(s)
 				nup += 1
+				//fmt.Printf(Green+"restart %v, nup now is %v\n"+Reset, s, nup)
 			}
 		}
 	}
@@ -908,7 +912,6 @@ func TestUnreliableAgree2C(t *testing.T) {
 
 	cfg.end()
 }
-
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true, false)
