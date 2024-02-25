@@ -223,31 +223,21 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	defer rf.persist()
+	//defer rf.persist()
 	// 选举失败信息
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	reply.Term = rf.term
-	if args.Term == -1 {
-		if args.CandidateId == rf.votedFor {
-			rf.votedFor = -1
-			return
-		}
-	}
 	// term 或者log term不符合要求的话不能获得投票
-	c1 := rf.term > args.Term
+	c1 := rf.term >= args.Term
 	c2 := (rf.logs[len(rf.logs)-1].Term > args.LastLogTerm) || ((rf.logs[len(rf.logs)-1].Term == args.LastLogTerm) && ((len(rf.logs) - 1) > args.LastLogIndex))
 	if c1 || c2 { // term不够
 		reply.VoteGranted = false
 		//fmt.Printf("%v refuse vote for %v, now term %v, args:%v,len(rf.logs):%v \n", rf.me, args.CandidateId, rf.term, args, len(rf.logs))
-	} else if rf.term == args.Term {
-		if rf.votedFor == -1 && rf.status == Follower {
-			rf.votedFor = args.CandidateId
-			//fmt.Printf("%v voted for %v, now term %v\n", rf.me, args.CandidateId, rf.term)
-			reply.VoteGranted = true
-		}
 	} else { // rf.term < args.Term 此时必须同意
+		//fmt.Printf("%v vote for %v, now term %v \n", rf.me, args.CandidateId, rf.term)
 		if rf.status != Follower {
+			idx := min(len(rf.logs), rf.commitIndex+1)
+			rf.logs = rf.logs[:idx]
 			rf.status = Follower
 			if rf.status == Candidate {
 				rf.voteResult <- 1
@@ -287,12 +277,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, mu *sync.Mutex, ch chan int, voted *int) bool {
-	defer rf.persist()
+	//defer rf.persist()
 	if server != rf.me {
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-		if reply.Term > rf.term {
-			rf.term = reply.Term
-		}
 		if !ok {
 			return false
 		}
@@ -311,7 +298,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // 发送心跳 / 日志更新消息
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	defer rf.persist()
+	//defer rf.persist()
 	if server != rf.me {
 		//如果network被切断，这里会被阻塞相当长的一段时间
 		//考虑到上述原因，这里一旦调用失败直接返回，不再追加
@@ -326,6 +313,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			//start可能会给刚复活的老leaderappend一些无效logs
 			//这里需要将老leader的无效logs给清空
 			//不然会被新leader的commitIndex给误commit
+			rf.votedFor = -1
 			rf.term = reply.Term
 			rf.status = Follower
 			idx := min(len(rf.logs), rf.commitIndex+1)
@@ -366,7 +354,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	//defer rf.persist()
 
 	crash := false
 	if args.PreLogIndex > len(rf.logs)-1 {
@@ -404,10 +392,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 		if len(args.Logs) == 0 { // 心跳
+			rf.votedFor = -1
 			if rf.status == Candidate {
 				// 选举过程中收到心跳则立刻掐死该次选举
 				rf.status = Follower
-				rf.votedFor = -1
 				rf.voteResult <- 1
 			}
 		} else { //日志更新
@@ -472,7 +460,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.term
 	rf.nextIndex[rf.me]++
 	// start最后的结果不一定commit了，具体的append放在HeartBeat中处理
-	rf.persist()
+	//rf.persist()
 	return index, term, isLeader
 }
 
@@ -510,6 +498,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.status = Candidate
 			rf.votedFor = rf.me
+			rf.term++
 			rf.mu.Unlock()
 			mu := sync.Mutex{}
 			rf.voteResult = make(chan int)
@@ -529,7 +518,6 @@ func (rf *Raft) ticker() {
 				// 如果被选中为leader
 				if voted > len(rf.peers)/2 && rf.status == Candidate {
 					rf.status = Leader
-					rf.term++
 					rf.votedFor = -1
 					l := len(rf.logs)
 					for i := 0; i < len(rf.peers); i++ {
@@ -548,19 +536,14 @@ func (rf *Raft) ticker() {
 				}
 				//如果超过了选举时间，则此次选举失败
 				//选举失败的话，需要告诉给这位投过票的人
-			case <-time.After(time.Duration(rand.Int63()%700+300) * time.Millisecond):
+			case <-time.After(time.Duration(rand.Int63()%600+200) * time.Millisecond):
 				//fmt.Printf("%v timeout elect failure\n", rf.me)
 				rf.mu.Lock()
 				rf.status = Follower
 				rf.votedFor = -1
 				rf.mu.Unlock()
-				args := RequestVoteArgs{-1, rf.me, 0, 0}
-				for i, _ := range rf.peers {
-					reply := RequestVoteReply{}
-					go rf.sendRequestVote(i, &args, &reply, &mu, rf.voteResult, &voted)
-				}
 			}
-			rf.persist()
+			//rf.persist()
 		} else {
 			rf.LeaderHeartBeat = false
 			rf.mu.Unlock()
