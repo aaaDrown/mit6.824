@@ -319,7 +319,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.logs = rf.logs[:idx]
 			return true
 		}
-		rf.nextIndex[server] += reply.AppendIndex
+		rf.nextIndex[server] = max(rf.nextIndex[server]+reply.AppendIndex, 1)
 		//fmt.Printf("%v nextIndex now is %v\n", server, rf.nextIndex[server])
 
 		if len(args.Logs) > 0 {
@@ -363,7 +363,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
 		//idx := min(len(rf.logs)-1, rf.commitIndex+1)
 		rf.logs = rf.logs[:rf.commitIndex+1]
-		reply.AppendIndex = -1 // 不匹配，nextIndex--
+		reply.AppendIndex = -3 // 不匹配，nextIndex--
 		rf.LeaderHeartBeat = true
 		reply.Success = true
 		reply.Term = args.Term
