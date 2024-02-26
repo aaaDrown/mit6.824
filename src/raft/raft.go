@@ -232,6 +232,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	c2 := (rf.logs[len(rf.logs)-1].Term > args.LastLogTerm) || ((rf.logs[len(rf.logs)-1].Term == args.LastLogTerm) && ((len(rf.logs) - 1) > args.LastLogIndex))
 	if c1 || c2 { // term不够
 		reply.VoteGranted = false
+		if !c1 {
+			rf.term = args.Term
+		}
 		//fmt.Printf("%v refuse vote for %v, now term %v, args:%v,len(rf.logs):%v \n", rf.me, args.CandidateId, rf.term, args, len(rf.logs))
 	} else { // rf.term < args.Term 此时必须同意
 		//fmt.Printf("%v vote for %v, now term %v \n", rf.me, args.CandidateId, rf.term)
@@ -383,7 +386,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.term
 	} else if rf.term == args.Term { //心跳 / 日志更新
 		rf.LeaderHeartBeat = true
-		//fmt.Printf("svr%v args.PreLogIndex:%v  len(rf.logs)-1):%v  args.LeaderCommit:%v  rf.commitIndex:%v\n", rf.me, args.PreLogIndex, len(rf.logs)-1, args.LeaderCommit, rf.commitIndex)
 		//condition1表示参数与当前follower不match
 		// 及时把已经committed的logs告诉给Foller
 		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
