@@ -471,50 +471,50 @@ loop:
 	cfg.end()
 }
 
-//func TestRejoin2B(t *testing.T) {
-//	servers := 3
-//	cfg := make_config(t, servers, false, false)
-//	defer cfg.cleanup()
-//
-//	cfg.begin("Test (2B): rejoin of partitioned leader")
-//
-//	cfg.one(101, servers, true)
-//
-//	// leader network failure
-//	leader1 := cfg.checkOneLeader()
-//	//fmt.Printf("disconnect %v\n\n", leader1)
-//	cfg.disconnect(leader1)
-//
-//	// make old leader try to agree on some entries
-//	cfg.rafts[leader1].Start(102)
-//	cfg.rafts[leader1].Start(103)
-//	cfg.rafts[leader1].Start(104)
-//
-//	// new leader commits, also for index=2
-//	cfg.one(103, 2, true)
-//
-//	// new leader network failure
-//	leader2 := cfg.checkOneLeader()
-//	//fmt.Printf("disconnect %v\n\n", leader2)
-//	cfg.disconnect(leader2)
-//
-//	// old leader connected again
-//	//101 103
-//	//101 103
-//	//101 102 103 104
-//	//fmt.Printf("reconnect %v\n\n", leader1)
-//	cfg.connect(leader1)
-//
-//	cfg.one(104, 2, true)
-//
-//	// all together now
-//	//fmt.Printf("reconnect %v\n\n", leader2)
-//	cfg.connect(leader2)
-//
-//	cfg.one(105, servers, true)
-//
-//	cfg.end()
-//}
+func TestRejoin2B(t *testing.T) {
+	servers := 3
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2B): rejoin of partitioned leader")
+
+	cfg.one(101, servers, true)
+
+	// leader network failure
+	leader1 := cfg.checkOneLeader()
+	//fmt.Printf("disconnect %v\n\n", leader1)
+	cfg.disconnect(leader1)
+
+	// make old leader try to agree on some entries
+	cfg.rafts[leader1].Start(102)
+	cfg.rafts[leader1].Start(103)
+	cfg.rafts[leader1].Start(104)
+
+	// new leader commits, also for index=2
+	cfg.one(103, 2, true)
+
+	// new leader network failure
+	leader2 := cfg.checkOneLeader()
+	//fmt.Printf("disconnect %v\n\n", leader2)
+	cfg.disconnect(leader2)
+
+	// old leader connected again
+	//101 103
+	//101 103
+	//101 102 103 104
+	//fmt.Printf("reconnect %v\n\n", leader1)
+	cfg.connect(leader1)
+
+	cfg.one(104, 2, true)
+
+	// all together now
+	//fmt.Printf("reconnect %v\n\n", leader2)
+	cfg.connect(leader2)
+
+	cfg.one(105, servers, true)
+
+	cfg.end()
+}
 
 func TestBackup2B(t *testing.T) {
 	servers := 5
