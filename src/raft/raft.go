@@ -232,14 +232,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		if !c1 {
 			rf.term = args.Term
+			rf.status = Follower
+			rf.votedFor = -1
+
 			rf.persist()
 		}
-		//fmt.Printf("%v refuse vote for %v, now term %v, args:%v,len(rf.logs):%v \n", rf.me, args.CandidateId, rf.term, args, len(rf.logs))
+		//fmt.Printf("%v with status %v refuse vote for %v, now term %v, args:%v,len(rf.logs):%v \n", rf.me, rf.status, args.CandidateId, rf.term, args, len(rf.logs))
 	} else { // 满足投票条件，此时必须同意
 		//fmt.Printf("%v vote for %v, now term %v \n", rf.me, args.CandidateId, rf.term)
 		if rf.status != Follower {
+			t := rf.status
 			rf.status = Follower
-			if rf.status == Candidate {
+			if t == Candidate {
 				rf.voteResult <- 1
 			}
 		}
@@ -563,6 +567,7 @@ func (rf *Raft) ticker() {
 			}
 		} else {
 			rf.LeaderHeartBeat = false
+			//fmt.Printf("svr %v status %v votefor %v\n", rf.me, rf.status, rf.votedFor)
 			rf.mu.Unlock()
 		}
 	}

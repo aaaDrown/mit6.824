@@ -9,17 +9,18 @@ package raft
 //
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 )
 import "fmt"
 import "time"
 import "math/rand"
-import "sync"
 
 const (
-	Reset = "\033[0m"
-	Green = "\033[32m"
+	Reset  = "\033[0m"
+	Green  = "\033[32m"
+	Yellow = "\033[33m"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -749,6 +750,8 @@ func TestPersist12C(t *testing.T) {
 	cfg.one(16, servers, true)
 
 	cfg.end()
+
+	//println(Yellow + "pass!!!" + Reset)
 }
 
 func TestPersist22C(t *testing.T) {
@@ -768,33 +771,42 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
 
+		//fmt.Printf(Green+"disconnect %d %d\n"+Reset, (leader1+1)%servers, (leader1+2)%servers)
+
 		cfg.one(10+index, servers-2, true)
 		index++
 
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
+		//fmt.Printf(Green+"disconnect %d %d %d\n"+Reset, (leader1+0)%servers, (leader1+3)%servers, (leader1+4)%servers)
 
 		cfg.start1((leader1+1)%servers, cfg.applier)
 		cfg.start1((leader1+2)%servers, cfg.applier)
+		//fmt.Printf(Green+"crash and restart %d %d\n"+Reset, (leader1+1)%servers, (leader1+2)%servers)
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
+		//fmt.Printf(Green+"reconnect %d %d\n"+Reset, (leader1+1)%servers, (leader1+2)%servers)
 
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1+3)%servers, cfg.applier)
+		//fmt.Printf(Green+"crash and restart %d \n"+Reset, (leader1+3)%servers)
 		cfg.connect((leader1 + 3) % servers)
-
+		//fmt.Printf(Green+"reconnect %d \n"+Reset, (leader1+3)%servers)
 		cfg.one(10+index, servers-2, true)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
+		//fmt.Printf(Green+"reconnect %d %d\n"+Reset, (leader1+0)%servers, (leader1+4)%servers)
 	}
 
 	cfg.one(1000, servers, true)
 
 	cfg.end()
+
+	//println(Yellow + "pass!!!" + Reset)
 }
 
 func TestPersist32C(t *testing.T) {
@@ -891,6 +903,7 @@ func TestFigure82C(t *testing.T) {
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
+	//println(Yellow + "pass!!!" + Reset)
 }
 
 func TestUnreliableAgree2C(t *testing.T) {
@@ -920,6 +933,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.one(100, servers, true)
 
 	cfg.end()
+	//println(Yellow + "pass!!!" + Reset)
 }
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
@@ -974,6 +988,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
+	//println(Yellow + "pass!!!" + Reset)
 }
 
 func internalChurn(t *testing.T, unreliable bool) {
@@ -1119,6 +1134,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 	}
 
 	cfg.end()
+	//println(Yellow + "pass!!!" + Reset)
 }
 
 func TestReliableChurn2C(t *testing.T) {
