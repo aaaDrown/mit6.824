@@ -178,24 +178,18 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
-	// Your code here (2C).
 	//println("\033[32m" + "save" + "\033[0m")
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.term)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
-	e.Encode(rf.commitIndex)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
 	//println("\033[32m" + "read" + "\033[0m")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -206,17 +200,15 @@ func (rf *Raft) readPersist(data []byte) {
 	var term int
 	var votedFor int
 	var logs []LogEntry
-	var commitIndex int
 
 	if d.Decode(&term) != nil ||
-		d.Decode(&votedFor) != nil || d.Decode(&logs) != nil || d.Decode(&commitIndex) != nil {
+		d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
 		println("something wrong in decode")
 	} else {
 		//fmt.Printf("%v read persist: term %v, votedFor %v, logs %v, commitIndex %v\n", rf.me, term, votedFor, logs, commitIndex)
 		rf.term = term
 		rf.votedFor = votedFor
 		rf.logs = logs
-		rf.commitIndex = commitIndex
 	}
 }
 
@@ -326,7 +318,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if reply.Term > rf.term {
-			println("fuck")
 			//start可能会给刚复活的老leaderappend一些无效logs
 			//这里需要将老leader的无效logs给清空
 			//不然会被新leader的commitIndex给误commit
@@ -356,7 +347,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				}
 				if rf.nextIndex[server]-1 > rf.commitIndex {
 					rf.commitIndex = rf.nextIndex[server] - 1
-					rf.persist()
 					fmt.Printf("%v commitIndex now is %v\n", rf.me, rf.commitIndex)
 				}
 			}
@@ -396,8 +386,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		newestTerm := rf.logs[i].Term
 		for ; i >= 0 && rf.logs[i].Term == newestTerm; i-- {
 		}
-		reply.NextIndex = i + 1 // 不匹配，nextIndex调整
-		rf.logs = rf.logs[:i+1]
+		reply.NextIndex = max(i+1, 1) // 不匹配，nextIndex调整
+		rf.logs = rf.logs[:reply.NextIndex]
+		rf.persist()
+
 		rf.LeaderHeartBeat = true
 		reply.Success = true
 		reply.Term = rf.term
@@ -413,7 +405,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
 		}
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		rf.persist()
 		if len(args.Logs) == 0 { // 心跳
 			rf.votedFor = -1
 			rf.persist()
@@ -508,6 +499,9 @@ func (rf *Raft) LeaderSend() {
 			rf.mu.Unlock()
 			fmt.Printf("%v send heart beat with term %v\n", rf.me, rf.term)
 			for i, _ := range rf.peers {
+				if rf.nextIndex[i] > len(rf.logs) {
+					break
+				}
 				//fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.me, i, rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
 				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
 				reply := AppendEntriesReply{}
