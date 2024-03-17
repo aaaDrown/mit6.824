@@ -398,8 +398,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if rf.term == args.Term { //心跳 / 日志更新
 		rf.LeaderHeartBeat = true
-		//condition1表示参数与当前follower不match
-		// 及时把已经committed的logs告诉给Foller
 		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
 			fmt.Printf("svr%v applying %v,now term %v \n", rf.me, rf.logs[i].Command, rf.term)
 			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
@@ -415,16 +413,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else { //日志更新
 			// 捎带确认，commit老的，append新的
 			for i := 0; i < len(args.Logs); i++ {
-
-				if args.PreLogIndex+i+1 == len(rf.logs) { // 正常情况
-					fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
-					rf.logs = append(rf.logs, args.Logs[i])
-				} else if args.PreLogIndex+i+1 < len(rf.logs) { //有冗余的无效log 需要先覆盖掉
-					fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
-					rf.logs[args.PreLogIndex+i+1] = args.Logs[i]
-				} else {
-					//fmt.Printf("something wrong in appendEntry, rf.logs %v  args.PreLogIndex %v\n", rf.logs, args.PreLogIndex)
-				}
+				fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
+				rf.logs = append(rf.logs, args.Logs[i])
 			}
 			rf.persist()
 		}
@@ -438,16 +428,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.LeaderHeartBeat = true
 		rf.votedFor = -1
 		rf.term = args.Term
-		rf.logs = rf.logs[:rf.commitIndex+1]
+		rf.persist()
 		for i := 0; i < len(args.Logs); i++ {
 			fmt.Printf("svr%v append %v\n", rf.me, args.Logs[i].Command)
-			if args.PreLogIndex+i+1 == len(rf.logs) {
-				rf.logs = append(rf.logs, args.Logs[i])
-			} else if args.PreLogIndex+i+1 < len(rf.logs) {
-				rf.logs[args.PreLogIndex+i+1] = args.Logs[i]
-			} else {
-				//fmt.Printf("something wrong in appendEntry, rf.logs %v  args.PreLogIndex %v\n", rf.logs, args.PreLogIndex)
-			}
+			rf.logs = append(rf.logs, args.Logs[i])
 		}
 		rf.persist()
 		reply.NextIndex = args.PreLogIndex + len(args.Logs) + 1
@@ -565,7 +549,6 @@ func (rf *Raft) ticker() {
 					fmt.Printf("%v elect failure\n", rf.me)
 					rf.status = Follower
 					rf.votedFor = -1
-					rf.logs = rf.logs[:rf.commitIndex+1]
 					rf.persist()
 					rf.mu.Unlock()
 				}
@@ -576,7 +559,6 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock()
 				rf.status = Follower
 				rf.votedFor = -1
-				rf.logs = rf.logs[:rf.commitIndex+1]
 				rf.persist()
 				rf.mu.Unlock()
 			}
