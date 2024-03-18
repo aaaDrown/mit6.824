@@ -51,7 +51,6 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 
-	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
@@ -59,7 +58,6 @@ type ApplyMsg struct {
 }
 
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term         int
 	CandidateId  int
 	LastLogIndex int
@@ -67,7 +65,6 @@ type RequestVoteArgs struct {
 }
 
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 }
@@ -94,9 +91,14 @@ type AppendEntriesReply struct {
 }
 
 type InstallSnapshotArgs struct {
+	Term              int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Snapshot          []byte
 }
 
 type InstallSnapshotReply struct {
+	Term int
 }
 
 // A Go object implementing a single Raft peer.
@@ -241,13 +243,36 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-func (rf *Raft) InstallSnapshot() {
-
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.term {
+		reply.Term = rf.term
+		return
+	} else {
+		rf.term = args.Term
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		rf.lastIncludedTerm = args.LastIncludedTerm
+		rf.logs = rf.logs[:1]
+		rf.persister.snapshot = args.Snapshot
+		rf.applyCh <- ApplyMsg{false, nil, 0, true, args.Snapshot, args.LastIncludedTerm, args.LastIncludedIndex}
+	}
 }
 
-func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	if !ok {
+		return false
+	}
+	if reply.Term > rf.term {
+		rf.mu.Lock()
+		rf.status = Follower
+		rf.term = reply.Term
+		rf.mu.Unlock()
+		return true
+	}
+	rf.nextIndex[server] = args.LastIncludedIndex + 1
+	return true
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -283,15 +308,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
 // The labrpc package simulates a lossy network, in which servers
 // may be unreachable, and in which requests and replies may be lost.
 // Call() sends a request and waits for a reply. If a reply arrives
@@ -305,11 +321,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // is no need to implement your own timeouts around Call().
 //
 // look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, mu *sync.Mutex, ch chan int, voted *int) bool {
 	if server != rf.me {
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
@@ -413,7 +424,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
 		fmt.Printf("%v send to %v crash happen\n", args.LeaderId, rf.me)
 		// 当前rf的最新log不匹配，回退到上一个term的log
-		i := max(len(rf.logs)-1-rf.lastIncludedIndex, 1)
+		i := max(len(rf.logs)-1-rf.lastIncludedIndex, 0)
 		newestTerm := rf.logs[i].Term
 		for ; i >= 0 && rf.logs[i].Term == newestTerm; i-- {
 		}
@@ -523,15 +534,27 @@ func (rf *Raft) LeaderSend() {
 					break
 				}
 				preLogTerm := 0
-				if rf.nextIndex[i]-1-rf.lastIncludedIndex == 0 {
-					preLogTerm = rf.lastIncludedTerm
+				rf.mu.Lock()
+				if rf.nextIndex[i]-1-rf.lastIncludedIndex < 0 && rf.lastIncludedIndex > 0 {
+					args := InstallSnapshotArgs{rf.term, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.snapshot}
+					reply := InstallSnapshotReply{}
+					rf.mu.Unlock()
+					fmt.Printf("%v install snapshot for %v\n", rf.me, i)
+					go rf.sendInstallSnapshot(i, &args, &reply)
 				} else {
-					preLogTerm = rf.logs[rf.nextIndex[i]-1-rf.lastIncludedIndex].Term
+					if rf.nextIndex[i]-1-rf.lastIncludedIndex == 0 {
+						preLogTerm = rf.lastIncludedTerm
+					} else {
+						preLogTerm = rf.logs[rf.nextIndex[i]-1-rf.lastIncludedIndex].Term
+					}
+					args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, preLogTerm, rf.logs[rf.nextIndex[i]-rf.lastIncludedIndex:], rf.commitIndex}
+					reply := AppendEntriesReply{}
+					rf.mu.Unlock()
+					go rf.sendAppendEntries(i, &args, &reply)
 				}
-				fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v,rf.nextIndex[i]-1-rf.lastIncludedIndex %v \n", rf.me, i, rf.nextIndex[i]-1, rf.nextIndex[i]-1-rf.lastIncludedIndex)
-				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, preLogTerm, rf.logs[rf.nextIndex[i]-rf.lastIncludedIndex:], rf.commitIndex}
-				reply := AppendEntriesReply{}
-				go rf.sendAppendEntries(i, &args, &reply)
+
+				//fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v,rf.nextIndex[i]-1-rf.lastIncludedIndex %v \n", rf.me, i, rf.nextIndex[i]-1, rf.nextIndex[i]-1-rf.lastIncludedIndex)
+
 			}
 		} else {
 			rf.mu.Unlock()
