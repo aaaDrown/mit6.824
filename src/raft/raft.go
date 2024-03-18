@@ -44,7 +44,6 @@ const (
 	Follower
 	Leader
 )
-const ElectionTimeout = 500 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -78,7 +77,6 @@ type LogEntry struct {
 }
 
 type AppendEntriesArgs struct {
-	// Your data here (2A, 2B).
 	Term     int
 	LeaderId int
 
@@ -92,6 +90,12 @@ type AppendEntriesReply struct {
 	NextIndex int
 	Term      int
 	Success   bool
+}
+
+type InstallSnapshotArgs struct {
+}
+
+type InstallSnapshotReply struct {
 }
 
 // A Go object implementing a single Raft peer.
@@ -109,16 +113,13 @@ type Raft struct {
 	LeaderHeartBeat bool
 	voteResult      chan int // 若能提前得知竞选结果，则立刻通知
 
-	commitIndex int //commitIdx>=lastApplied
-	lastApplied int
-	nextIndex   []int
-	matchIndex  []int
-	applyCh     chan ApplyMsg
-
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
+	commitIndex       int //commitIdx>=lastApplied
+	lastApplied       int
+	nextIndex         []int
+	matchIndex        []int
+	applyCh           chan ApplyMsg
+	lastIncludedTerm  int
+	lastIncludedIndex int
 }
 
 func min(x int, y int) int {
@@ -184,6 +185,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
 	raftstate := w.Bytes()
+
 	rf.persister.Save(raftstate, nil)
 }
 
@@ -193,7 +195,6 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var term int
@@ -216,7 +217,28 @@ func (rf *Raft) readPersist(data []byte) {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+	// 7-5
+	start := index - rf.lastIncludedIndex
+	rf.lastIncludedTerm = rf.logs[index-rf.lastIncludedIndex].Term
+	rf.lastIncludedIndex = index
+	rf.logs = append(rf.logs[:1], rf.logs[start+1:]...)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, snapshot)
+
+}
+
+func (rf *Raft) InstallSnapshot() {
+
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 
 }
 
@@ -226,7 +248,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	// term 或者log term不符合要求的话不能获得投票
 	c1 := rf.term >= args.Term
-	c2 := (rf.logs[len(rf.logs)-1].Term > args.LastLogTerm) || ((rf.logs[len(rf.logs)-1].Term == args.LastLogTerm) && ((len(rf.logs) - 1) > args.LastLogIndex))
+	c2 := (rf.logs[len(rf.logs)-1].Term > args.LastLogTerm) || ((rf.logs[len(rf.logs)-1].Term == args.LastLogTerm) && ((len(rf.logs) - 1 + rf.lastIncludedIndex) > args.LastLogIndex))
 	if c1 || c2 { // term不够
 		reply.VoteGranted = false
 		if !c1 {
@@ -317,9 +339,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if reply.Term > rf.term {
-			//start可能会给刚复活的老leaderappend一些无效logs
-			//这里需要将老leader的无效logs给清空
-			//不然会被新leader的commitIndex给误commit
 			rf.votedFor = -1
 			rf.term = reply.Term
 			rf.status = Follower
@@ -336,11 +355,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 					cnt++
 				}
 			}
-			if cnt > len(rf.peers)/2 && rf.logs[rf.nextIndex[server]-1].Term == rf.term {
+			if cnt > len(rf.peers)/2 && rf.logs[rf.nextIndex[server]-1-rf.lastIncludedIndex].Term == rf.term {
 				for j := rf.commitIndex + 1; j < rf.nextIndex[server]; j++ {
 					//fmt.Printf("leader %v logs:%v\n", rf.me, rf.logs)
 					//fmt.Printf("leader %v now committing %v\n", rf.me, rf.logs[j].Command)
-					rf.applyCh <- ApplyMsg{true, rf.logs[j].Command, j, false, nil, 0, 0}
+					rf.applyCh <- ApplyMsg{true, rf.logs[j-rf.lastIncludedIndex].Command, j, false, nil, 0, 0}
 				}
 				if rf.nextIndex[server]-1 > rf.commitIndex {
 					rf.commitIndex = rf.nextIndex[server] - 1
@@ -366,12 +385,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	crash := false
-	if args.PreLogIndex != len(rf.logs)-1 {
+	if args.PreLogIndex != len(rf.logs)-1+rf.lastIncludedIndex {
 		crash = true
 	} else {
 		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
 		//所以如果直接判断else的话可能会数组越界
-		if args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
+		if args.PreLogTerm != rf.logs[args.PreLogIndex-rf.lastIncludedIndex].Term {
 			crash = true
 		}
 	}
@@ -379,12 +398,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//这里不match有一种情况是刚复活的老leader不匹配刚诞生的新leader的nextIndex
 		//fmt.Printf("%v send to %v crash happen\n", args.LeaderId, rf.me)
 		// 当前rf的最新log不匹配，回退到上一个term的log
-		i := len(rf.logs) - 1
+		i := len(rf.logs) - 1 - rf.lastIncludedIndex
 		newestTerm := rf.logs[i].Term
 		for ; i >= 0 && rf.logs[i].Term == newestTerm; i-- {
 		}
 		reply.NextIndex = max(i+1, 1) // 不匹配，nextIndex调整
-		rf.logs = rf.logs[:reply.NextIndex]
+		rf.logs = rf.logs[:reply.NextIndex-rf.lastIncludedIndex]
 		rf.persist()
 
 		rf.LeaderHeartBeat = true
@@ -395,11 +414,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if rf.term == args.Term { //心跳 / 日志更新
 		rf.LeaderHeartBeat = true
-		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1); i++ {
+		for i := rf.commitIndex + 1; i <= min(args.LeaderCommit, len(rf.logs)-1+rf.lastIncludedIndex); i++ {
 			//fmt.Printf("svr%v applying %v,now term %v \n", rf.me, rf.logs[i].Command, rf.term)
-			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i, false, nil, 0, 0}
+			rf.applyCh <- ApplyMsg{true, rf.logs[i-rf.lastIncludedIndex].Command, i, false, nil, 0, 0}
 		}
-		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1+rf.lastIncludedIndex)
 		if len(args.Logs) == 0 { // 心跳
 			rf.votedFor = -1
 			rf.persist()
@@ -464,7 +483,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = true
 	//fmt.Printf("%v append %v\n", rf.me, command)
 	rf.logs = append(rf.logs, LogEntry{command, rf.term})
-	index = len(rf.logs) - 1
+	index = rf.lastIncludedIndex + len(rf.logs) - 1
 	term = rf.term
 	rf.nextIndex[rf.me]++
 	// start最后的结果不一定commit了，具体的append放在HeartBeat中处理
@@ -479,11 +498,11 @@ func (rf *Raft) LeaderSend() {
 			rf.mu.Unlock()
 			//fmt.Printf("%v send heart beat with term %v\n", rf.me, rf.term)
 			for i, _ := range rf.peers {
-				if rf.nextIndex[i] > len(rf.logs) {
+				if rf.nextIndex[i] > len(rf.logs)+rf.lastIncludedIndex {
 					break
 				}
 				//fmt.Printf("%v send to %v rf.nextIndex[i] - 1 %v, rf.logs[rf.nextIndex[i]-1].Term %v, rf.logs[rf.nextIndex[i]:] %v\n", rf.me, i, rf.nextIndex[i]-1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:])
-				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1].Term, rf.logs[rf.nextIndex[i]:], rf.commitIndex}
+				args := AppendEntriesArgs{rf.term, rf.me, rf.nextIndex[i] - 1, rf.logs[rf.nextIndex[i]-1-rf.lastIncludedIndex].Term, rf.logs[rf.nextIndex[i]-rf.lastIncludedIndex:], rf.commitIndex}
 				reply := AppendEntriesReply{}
 				go rf.sendAppendEntries(i, &args, &reply)
 			}
@@ -491,7 +510,7 @@ func (rf *Raft) LeaderSend() {
 			rf.mu.Unlock()
 			return
 		}
-		time.Sleep(time.Duration(130) * time.Millisecond)
+		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 }
 
@@ -515,7 +534,7 @@ func (rf *Raft) ticker() {
 			mu := sync.Mutex{}
 			rf.voteResult = make(chan int)
 
-			args := RequestVoteArgs{rf.term, rf.me, len(rf.logs) - 1, rf.logs[len(rf.logs)-1].Term}
+			args := RequestVoteArgs{rf.term, rf.me, len(rf.logs) - 1 + rf.lastIncludedIndex, rf.logs[len(rf.logs)-1].Term}
 			for i, _ := range rf.peers {
 				reply := RequestVoteReply{}
 				go rf.sendRequestVote(i, &args, &reply, &mu, rf.voteResult, &voted)
@@ -532,7 +551,7 @@ func (rf *Raft) ticker() {
 					rf.status = Leader
 					rf.votedFor = -1
 					rf.persist()
-					l := len(rf.logs)
+					l := len(rf.logs) + rf.lastIncludedIndex
 					for i := 0; i < len(rf.peers); i++ {
 						rf.nextIndex[i] = l
 						rf.matchIndex[i] = 0
@@ -583,6 +602,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.status = Follower
 	rf.votedFor = -1
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 	rf.applyCh = applyCh
 	rf.commitIndex = 0
 	rf.logs = []LogEntry{{nil, 0}}
